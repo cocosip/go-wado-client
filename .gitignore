@@ -38,8 +38,5 @@ Thumbs.db
 
 # Claude Code configuration (optional - keep if needed)
 .claude/
-
-# fo-dicom source code (reference only, not part of the Go project)
-fo-dicom-code/
 .cache/
 docs/superpowers/
