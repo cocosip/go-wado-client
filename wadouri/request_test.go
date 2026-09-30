@@ -35,9 +35,17 @@ func TestRequestValidate(t *testing.T) {
 		{"presentation pair with window pair", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			WindowCenter: &wc, WindowWidth: &ww, PresentationUID: testPresentationUID, PresentationSeriesUID: "1.2.10"}},
 		{"window with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
-			ContentType: "application/dicom", WindowCenter: &wc, WindowWidth: &ww}},
+			ContentType: testContentTypeDICOM, WindowCenter: &wc, WindowWidth: &ww}},
 		{"window with case-varied dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: "Application/DICOM", WindowCenter: &wc, WindowWidth: &ww}},
+		{"frameNumber with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeDICOM, FrameNumber: 3}},
+		{"imageQuality with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeDICOM, ImageQuality: 90}},
+		{"rows/columns with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeDICOM, Rows: 512, Columns: 512}},
+		{"region with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeDICOM, Region: &[4]float64{0.1, 0.1, 0.9, 0.9}}},
 		{"rows only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Rows: 512}},
 		{"region out of range", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			Region: &[4]float64{0.5, 0.1, 0.4, 0.9}}},
@@ -60,6 +68,10 @@ func TestRequestValidate(t *testing.T) {
 			Annotation: []string{AnnotationPatient}},
 		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			PresentationUID: testPresentationUID, PresentationSeriesUID: "1.2.10"},
+		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			TransferSyntax: "1.2.840.10008.1.2.1"},
+		// The PS3.18 wildcard ("any transfer syntax") is not a UID and passes.
+		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, TransferSyntax: "*"},
 	}
 	for _, req := range valid {
 		if err := req.validate(strictCheck); err != nil {

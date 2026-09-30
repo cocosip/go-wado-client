@@ -37,7 +37,8 @@ func (c *Client) RetrieveInstance(ctx context.Context, studyUID, seriesUID, sopU
 
 func (c *Client) retrieveMultipart(ctx context.Context, u *url.URL, partType string, opts []RetrieveOption) (*Multipart, error) {
 	cfg := buildRetrieveCfg(opts)
-	if cfg.transferSyntax != "" {
+	// "*" is the PS3.18 wildcard ("any transfer syntax"), not a UID.
+	if cfg.transferSyntax != "" && cfg.transferSyntax != "*" {
 		if err := c.core.CheckUID("transferSyntax", cfg.transferSyntax); err != nil {
 			return nil, err
 		}

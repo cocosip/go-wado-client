@@ -10,8 +10,13 @@ type retrieveCfg struct {
 	acceptOverride string
 }
 
-// WithTransferSyntax negotiates transcoding in the Accept header (e.g.
-// "1.2.840.10008.1.2.1").
+// WithTransferSyntax negotiates transcoding in the Accept header, e.g.
+// "1.2.840.10008.1.2.1" (Explicit VR Little Endian). PS3.18 also defines the
+// wildcard "*" ("any transfer syntax the server supports").
+//
+// The parameter applies to the multipart retrieves (study / series /
+// instance / frames); metadata responses are always dicom+json and never
+// carry it.
 func WithTransferSyntax(uid string) RetrieveOption {
 	return func(c *retrieveCfg) { c.transferSyntax = uid }
 }

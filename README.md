@@ -100,7 +100,8 @@ if resp.IsDICOM() { io.Copy(f, resp.Body) }
 
 Local validation rejects up front everything the standard says a server must
 answer with 400 (window pair/presentation pair/mutual exclusion, region
-bounds, UID whitelist).
+bounds, rendered-only parameters combined with application/dicom, UID
+whitelist).
 
 ## Multiple hospitals / tenants
 
@@ -163,9 +164,13 @@ Notes:
   `slog.Default()`.
 - **Parameter naming** defaults to the classic names spoken by deployed
   PACS today (`annotations`, `windowcenter`/`windowwidth`, `anonymity`);
-  `WithModernParamNames()` switches to the 2023+ standard names
-  (`annotation`, `window`, `anonymize`). `WithRawQuery` is the escape hatch
-  for private gateways.
+  `WithModernParamNames()` switches to the current standard names
+  (`annotation`, `window=center,width,function`, `anonymize` —
+  `WithWindowFunction` picks the VOI LUT function, `linear` by default).
+  `WithRawQuery` is the escape hatch for private gateways.
+- **Transfer syntax** negotiation accepts a UID or the PS3.18 wildcard `*`
+  ("any transfer syntax the server supports"); it applies to the multipart
+  retrieves (instances/frames) only — metadata is always dicom+json.
 - **Timeouts** are fine-grained (response header, TLS handshake); there is
   deliberately no overall client timeout — control large Study downloads
   with `context`.

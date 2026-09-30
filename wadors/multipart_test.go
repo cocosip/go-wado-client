@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+// uidFilename is the file name derived from the Content-Location UID of the
+// first fake part.
+const uidFilename = "1.2.840.777.dcm"
+
 func TestMultipartIteration(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="application/dicom"`)
@@ -100,8 +104,8 @@ func TestMultipartWriteToDir(t *testing.T) {
 		t.Fatalf("files = %v, want 2", files)
 	}
 	// First file named by the Content-Location UID, second by index.
-	if filepath.Base(files[0]) != "1.2.840.777.dcm" {
-		t.Errorf("file[0] = %q, want 1.2.840.777.dcm", filepath.Base(files[0]))
+	if filepath.Base(files[0]) != uidFilename {
+		t.Errorf("file[0] = %q, want uidFilename", filepath.Base(files[0]))
 	}
 	if filepath.Base(files[1]) != "part-000002.dcm" {
 		t.Errorf("file[1] = %q, want part-000002.dcm", filepath.Base(files[1]))
@@ -143,11 +147,25 @@ func TestMultipartWriteToDirDuplicateLocation(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("files = %v, want 2", files)
 	}
-	if filepath.Base(files[0]) != "1.2.840.777.dcm" {
-		t.Errorf("file[0] = %q, want 1.2.840.777.dcm", filepath.Base(files[0]))
+	if filepath.Base(files[0]) != uidFilename {
+		t.Errorf("file[0] = %q, want uidFilename", filepath.Base(files[0]))
 	}
 	if filepath.Base(files[1]) != "part-000002.dcm" {
 		t.Errorf("file[1] = %q, want part-000002.dcm (no overwrite)", filepath.Base(files[1]))
+	}
+}
+
+// TestPartFilenameStripsLocationQuery verifies that a Content-Location with
+// a query or fragment still names the file by its trailing UID segment.
+func TestPartFilenameStripsLocationQuery(t *testing.T) {
+	for loc, want := range map[string]string{
+		"http://h/dicomweb/studies/1.2/instances/1.2.840.777":          uidFilename,
+		"http://h/dicomweb/studies/1.2/instances/1.2.840.777?x=1":      uidFilename,
+		"http://h/dicomweb/studies/1.2/instances/1.2.840.777.dcm#frag": uidFilename,
+	} {
+		if got := partFilename(&Part{loc: loc, n: 1}); got != want {
+			t.Errorf("partFilename(%q) = %q, want %q", loc, got, want)
+		}
 	}
 }
 
@@ -155,7 +173,7 @@ func TestMultipartWriteToDirDuplicateLocation(t *testing.T) {
 // answer instance retrieval with a bare application/dicom body.
 func TestMultipartSinglePartTolerance(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/dicom")
+		w.Header().Set("Content-Type", mediaTypeDICOM)
 		_, _ = w.Write([]byte(dicomData1))
 	}))
 	defer srv.Close()

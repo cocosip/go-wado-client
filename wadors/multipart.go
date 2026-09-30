@@ -8,6 +8,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,11 @@ func (p *Part) Index() int { return p.n }
 
 func partFilename(p *Part) string {
 	if loc := p.ContentLocation(); loc != "" {
+		// Content-Location may carry a query or fragment; only the path's
+		// trailing segment can name a file.
+		if u, err := url.Parse(loc); err == nil {
+			loc = u.Path
+		}
 		seg := loc[strings.LastIndexByte(loc, '/')+1:]
 		seg = strings.TrimSuffix(seg, ".dcm")
 		if seg != "" && wado.ValidateUID(seg) == nil {

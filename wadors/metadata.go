@@ -37,22 +37,21 @@ func (c *Client) InstanceMetadata(ctx context.Context, studyUID, seriesUID, sopU
 	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID, "sopInstanceUID", sopUID); err != nil {
 		return nil, err
 	}
-	body, reqURL, err := c.fetchMetadata(ctx,
+	items, reqURL, err := c.metadataItems(ctx,
 		c.resourceURL("studies", studyUID, "series", seriesUID, "instances", sopUID, "metadata"), opts)
 	if err != nil {
 		return nil, err
 	}
-	return metadataDataset(body, reqURL)
+	if len(items) != 1 {
+		return nil, fmt.Errorf("wadors: instance metadata: expected a single item, got %d", len(items))
+	}
+	return metadataDataset(items[0], reqURL)
 }
 
 func (c *Client) metadataList(ctx context.Context, u *url.URL, opts []RetrieveOption) ([]*dataset.Dataset, error) {
-	body, reqURL, err := c.fetchMetadata(ctx, u, opts)
+	items, reqURL, err := c.metadataItems(ctx, u, opts)
 	if err != nil {
 		return nil, err
-	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(body, &items); err != nil {
-		return nil, fmt.Errorf("wadors: decode metadata: %w", err)
 	}
 	out := make([]*dataset.Dataset, 0, len(items))
 	for _, item := range items {
@@ -65,21 +64,9 @@ func (c *Client) metadataList(ctx context.Context, u *url.URL, opts []RetrieveOp
 	return out, nil
 }
 
-// metadataDataset parses one metadata item. Instance-level responses are
-// accepted in both deployed forms: the single-element JSON array that
-// conformant servers return ([dataset] — Orthanc, dcm4che and the
-// dicomweb-client reference) and a bare object.
+// metadataDataset parses one metadata item (a bare dataset object; array
+// unwrapping happens in metadataPartItems).
 func metadataDataset(raw json.RawMessage, reqURL *url.URL) (*dataset.Dataset, error) {
-	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '[' {
-		var items []json.RawMessage
-		if err := json.Unmarshal(trimmed, &items); err != nil {
-			return nil, fmt.Errorf("wadors: decode metadata: %w", err)
-		}
-		if len(items) != 1 {
-			return nil, fmt.Errorf("wadors: instance metadata: expected a single item, got %d", len(items))
-		}
-		raw = items[0]
-	}
 	fixed, err := resolveBulkDataURIsJSON(raw, reqURL)
 	if err != nil {
 		return nil, err
@@ -91,22 +78,22 @@ func metadataDataset(raw json.RawMessage, reqURL *url.URL) (*dataset.Dataset, er
 	return ds, nil
 }
 
-// fetchMetadata fetches metadata; it tolerates older servers that wrap
-// dicom+json in multipart.
-func (c *Client) fetchMetadata(ctx context.Context, u *url.URL, opts []RetrieveOption) ([]byte, *url.URL, error) {
+// metadataItems fetches metadata and returns the individual dataset items
+// plus the final request URL (the base for relative BulkDataURI resolution
+// per PS3.18).
+//
+// Each part is parsed independently: a part carrying a JSON array contributes
+// its elements, a part carrying a bare object contributes itself. Older
+// servers that wrap dicom+json in multipart/related with one dataset per part
+// therefore parse correctly instead of yielding invalid concatenated JSON.
+// The transfer-syntax RetrieveOption is not emitted here: metadata responses
+// are always dicom+json (see WithTransferSyntax).
+func (c *Client) metadataItems(ctx context.Context, u *url.URL, opts []RetrieveOption) ([]json.RawMessage, *url.URL, error) {
 	cfg := buildRetrieveCfg(opts)
-	if cfg.transferSyntax != "" {
-		if err := c.core.CheckUID("transferSyntax", cfg.transferSyntax); err != nil {
-			return nil, nil, err
-		}
-	}
 	resp, err := c.do(ctx, u, func(req *http.Request) {
 		accept := cfg.acceptOverride
 		if accept == "" {
 			accept = "application/dicom+json"
-			if cfg.transferSyntax != "" {
-				accept += `; transfer-syntax=` + cfg.transferSyntax
-			}
 		}
 		req.Header.Set("Accept", accept)
 		if cfg.charset != "" {
@@ -121,7 +108,7 @@ func (c *Client) fetchMetadata(ctx context.Context, u *url.URL, opts []RetrieveO
 		return nil, nil, err
 	}
 	defer func() { _ = mp.Close() }()
-	var body []byte
+	var items []json.RawMessage
 	for p, err := range mp.Parts() {
 		if err != nil {
 			return nil, nil, err
@@ -130,9 +117,31 @@ func (c *Client) fetchMetadata(ctx context.Context, u *url.URL, opts []RetrieveO
 		if err != nil {
 			return nil, nil, err
 		}
-		body = append(body, b...)
+		partItems, err := metadataPartItems(b)
+		if err != nil {
+			return nil, nil, err
+		}
+		items = append(items, partItems...)
 	}
-	return body, resp.Request.URL, nil
+	return items, resp.Request.URL, nil
+}
+
+// metadataPartItems extracts the dataset items of one metadata part: either
+// the elements of a JSON array (the conformant form) or the single bare
+// object some servers send.
+func metadataPartItems(body []byte) ([]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	if trimmed[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, fmt.Errorf("wadors: decode metadata: %w", err)
+		}
+		return items, nil
+	}
+	return []json.RawMessage{json.RawMessage(trimmed)}, nil
 }
 
 // resolveBulkDataURIsJSON rewrites relative BulkDataURI values to absolute
@@ -150,7 +159,12 @@ func resolveBulkDataURIsJSON(raw json.RawMessage, base *url.URL) (json.RawMessag
 		return raw, nil
 	}
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	// UseNumber keeps numeric literals verbatim across the decode / re-encode
+	// round trip: DICOM JSON numbers (DS precision, large IS/UL values) must
+	// not be perturbed by float64 conversion.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		return nil, fmt.Errorf("wadors: decode metadata json: %w", err)
 	}
 	if !resolveBulkDataValue(v, base) {

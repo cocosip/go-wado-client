@@ -85,7 +85,9 @@ func TestRetrieveRenderedInstanceModernNames(t *testing.T) {
 	if v := got.query.Get("annotation"); v != "patient" {
 		t.Errorf("annotation = %q", v)
 	}
-	if v := got.query.Get("window"); v != "40,400" {
+	// PS3.18 §8.3.5: all three components (center,width,function) are
+	// mandatory; the function defaults to linear.
+	if v := got.query.Get("window"); v != "40,400,linear" {
 		t.Errorf("window = %q", v)
 	}
 	if v := got.query.Get("iccprofile"); v != "sRGB" {
@@ -173,8 +175,48 @@ func TestRenderedWindowFormatNoExponent(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = img.Close()
-	if v := got.query.Get("window"); v != "10000000,40000000" {
-		t.Errorf("window = %q, want 10000000,40000000", v)
+	if v := got.query.Get("window"); v != "10000000,40000000,linear" {
+		t.Errorf("window = %q, want 10000000,40000000,linear", v)
+	}
+}
+
+// TestRenderedWindowFunction covers the modern window=function component:
+// PS3.18 §8.3.5 requires all three values; classic windowcenter/windowwidth
+// have no function component and must ignore the option.
+func TestRenderedWindowFunction(t *testing.T) {
+	var got captured
+	srv := newRenderedServer(t, &got)
+	defer srv.Close()
+
+	c, _ := New(srv.URL+"/api/wado/H1", wado.WithModernParamNames())
+	img, err := c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
+		WithWindow(40, 400), WithWindowFunction(WindowFunctionSigmoid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = img.Close()
+	if v := got.query.Get("window"); v != "40,400,sigmoid" {
+		t.Errorf("window = %q, want 40,400,sigmoid", v)
+	}
+
+	// Unknown function names are rejected locally.
+	_, err = c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
+		WithWindow(40, 400), WithWindowFunction("bogus"))
+	if !errors.Is(err, wado.ErrInvalidRequest) {
+		t.Errorf("unknown function err = %v, want ErrInvalidRequest", err)
+	}
+
+	// Classic mode has no function component; the option is a no-op there.
+	classic, _ := New(srv.URL + "/api/wado/H1")
+	img, err = classic.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
+		WithWindow(40, 400), WithWindowFunction(WindowFunctionSigmoid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = img.Close()
+	if v := got.query.Get("windowcenter"); v != "40" || got.query.Get("windowwidth") != "400" {
+		t.Errorf("classic window = %q/%q, want 40/400 without a function component",
+			got.query.Get("windowcenter"), got.query.Get("windowwidth"))
 	}
 }
 

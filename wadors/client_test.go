@@ -73,6 +73,20 @@ func TestResourceURLsAndAccept(t *testing.T) {
 			wantAccept: `multipart/related; type="application/dicom"; transfer-syntax=1.2.840.10008.1.2.1`,
 		},
 		{
+			// PS3.18 defines the "*" wildcard ("any transfer syntax").
+			name: "instance with transfer syntax wildcard",
+			call: func() error {
+				mp, err := c.RetrieveInstance(ctx, "1.2.840.113619", "1.2.840.4", "1.2.840.5",
+					WithTransferSyntax("*"))
+				if err != nil {
+					return err
+				}
+				return mp.Close()
+			},
+			wantPath:   prefix + "/studies/1.2.840.113619/series/1.2.840.4/instances/1.2.840.5",
+			wantAccept: `multipart/related; type="application/dicom"; transfer-syntax=*`,
+		},
+		{
 			name: "frames sorted and deduplicated",
 			call: func() error {
 				mp, err := c.RetrieveFrames(ctx, "1.2.840.113619", "1.2.840.4", "1.2.840.5",

@@ -27,7 +27,9 @@ type Client struct {
 	ep   *url.URL
 }
 
-// New creates a client; endpoint is the full WADO-URI service URL.
+// New creates a client; endpoint is the full WADO-URI service URL. Any query
+// or fragment component of the endpoint is discarded during normalization —
+// fixed private parameters belong in Request.Extra instead.
 func New(endpoint string, opts ...wado.Option) (*Client, error) {
 	u, err := wado.ParseBaseURL(endpoint)
 	if err != nil {

@@ -20,6 +20,8 @@ const (
 	anonymizeEnabled = "yes"
 	// reasonSetTogether is shared by the paired-parameter validations.
 	reasonSetTogether = "must be set together"
+	// reasonNeedsRendered is shared by the rendered-only-parameter checks.
+	reasonNeedsRendered = "requires a rendered contentType"
 )
 
 // Request holds the WADO-URI retrieval parameters.
@@ -38,12 +40,14 @@ type Request struct {
 	Anonymize      bool     // emitted as anonymity=yes (anonymize=yes with modern names)
 	Annotation     []string // "patient" / "technique"
 
-	// Rendered parameters below.
-	FrameNumber  int
-	ImageQuality int // 1..100
-	Rows         int // paired with Columns
+	// Rendered parameters below. Per PS3.18 §9.5 they apply to rendered
+	// retrieval only, so they are rejected together with the
+	// application/dicom content type (the server would answer 400).
+	FrameNumber  int // 1-based; 0 = absent
+	ImageQuality int // 1..100; 0 = absent
+	Rows         int // paired with Columns; 0 = absent
 	Columns      int
-	Region       *[4]float64 // xmin,ymin,xmax,ymax normalized to 0..1
+	Region       *[4]float64 // xmin,ymin,xmax,ymax normalized to 0..1; nil = absent
 
 	// Window center/width: set together, mutually exclusive with
 	// Presentation*, and not allowed for application/dicom.
@@ -63,8 +67,20 @@ type Request struct {
 // validate performs local validation, rejecting up front the cases where
 // the standard mandates a server-side 400.
 func (r Request) validate(checkUID func(field, uid string) error) error {
-	// The mandatory identification triple: the server must reject requests
-	// missing any of them.
+	if err := r.validateUIDs(checkUID); err != nil {
+		return err
+	}
+	isDICOM := r.ContentType == "" ||
+		strings.EqualFold(strings.TrimSpace(r.ContentType), "application/dicom")
+	if err := r.validateWindowAndPresentation(isDICOM); err != nil {
+		return err
+	}
+	return r.validateRenderedValues(isDICOM)
+}
+
+// validateUIDs checks the mandatory identification triple and the optional
+// UIDs against the whitelist.
+func (r Request) validateUIDs(checkUID func(field, uid string) error) error {
 	for _, f := range []struct{ field, uid string }{
 		{"StudyUID", r.StudyUID},
 		{"SeriesUID", r.SeriesUID},
@@ -80,7 +96,6 @@ func (r Request) validate(checkUID func(field, uid string) error) error {
 		{"objectUID", r.ObjectUID},
 		{"presentationUID", r.PresentationUID},
 		{"presentationSeriesUID", r.PresentationSeriesUID},
-		{"transferSyntax", r.TransferSyntax},
 	} {
 		if f.uid == "" {
 			continue
@@ -89,24 +104,56 @@ func (r Request) validate(checkUID func(field, uid string) error) error {
 			return err
 		}
 	}
-	hasWindow := r.WindowCenter != nil || r.WindowWidth != nil
+	// transferSyntax is validated separately: besides UIDs, PS3.18 defines
+	// the wildcard "*" ("any transfer syntax the server supports").
+	if r.TransferSyntax != "" && r.TransferSyntax != "*" {
+		if err := checkUID("transferSyntax", r.TransferSyntax); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateWindowAndPresentation enforces the window pair, the presentation
+// state pair, their mutual exclusion, and that windowing only combines with
+// a rendered content type.
+func (r Request) validateWindowAndPresentation(isDICOM bool) error {
 	if (r.WindowCenter != nil) != (r.WindowWidth != nil) {
 		return &wado.RequestError{Field: "WindowCenter/WindowWidth", Reason: reasonSetTogether}
 	}
-	hasPres := r.PresentationUID != "" || r.PresentationSeriesUID != ""
 	if (r.PresentationUID != "") != (r.PresentationSeriesUID != "") {
 		return &wado.RequestError{Field: "PresentationUID/PresentationSeriesUID", Reason: reasonSetTogether}
 	}
+	hasWindow := r.WindowCenter != nil || r.WindowWidth != nil
+	hasPres := r.PresentationUID != "" || r.PresentationSeriesUID != ""
 	if hasWindow && hasPres {
 		return &wado.RequestError{Field: "WindowCenter", Reason: "windowing and presentation state are mutually exclusive"}
 	}
-	isDICOM := r.ContentType == "" ||
-		strings.EqualFold(strings.TrimSpace(r.ContentType), "application/dicom")
 	if hasWindow && isDICOM {
 		return &wado.RequestError{Field: "WindowCenter", Reason: "windowing requires a rendered contentType"}
 	}
+	return nil
+}
+
+// validateRenderedValues checks the rendered-only parameters: the paired
+// rows/columns constraint, their exclusion from the DICOM instance
+// transaction (PS3.18 §9.5: they apply to rendered retrieval only), the
+// region bounds, and the remaining value ranges.
+func (r Request) validateRenderedValues(isDICOM bool) error {
 	if (r.Rows > 0) != (r.Columns > 0) {
 		return &wado.RequestError{Field: "Rows/Columns", Reason: reasonSetTogether}
+	}
+	if isDICOM {
+		switch {
+		case r.FrameNumber != 0:
+			return &wado.RequestError{Field: "FrameNumber", Reason: reasonNeedsRendered}
+		case r.ImageQuality != 0:
+			return &wado.RequestError{Field: "ImageQuality", Reason: reasonNeedsRendered}
+		case r.Rows != 0 || r.Columns != 0:
+			return &wado.RequestError{Field: "Rows/Columns", Reason: reasonNeedsRendered}
+		case r.Region != nil:
+			return &wado.RequestError{Field: "Region", Reason: reasonNeedsRendered}
+		}
 	}
 	if r.Region != nil {
 		x1, y1, x2, y2 := r.Region[0], r.Region[1], r.Region[2], r.Region[3]

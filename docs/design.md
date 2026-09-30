@@ -50,9 +50,9 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 要点：
 
 - **`{study}`/`{series}`/`{instance}` 是 UID 原样出现在路径段中**；`{frames}` 为逗号分隔、升序帧号（1 起，现行文本不含区间语法）。
-- **媒体类型协商走 `Accept` 头**（双端必选支持）：实例检索 `multipart/related; type="application/dicom"`，可附加 `transfer-syntax=<UID>` 参数协商转码；元数据 `application/dicom+json`；帧/批量数据 `multipart/related; type="application/octet-stream"`。新版另定义了 `accept`/`charset` 查询参数，老服务器只认头，库统一走 `Accept` 头（兼容面最大）。
+- **媒体类型协商走 `Accept` 头**（双端必选支持）：实例检索 `multipart/related; type="application/dicom"`，可附加 `transfer-syntax=<UID>` 参数协商转码（`*` 为标准定义的通配符，表示"服务器任选支持的传输语法"；该参数仅适用于实例/帧检索，metadata 恒为 dicom+json 不携带）；元数据 `application/dicom+json`；帧/批量数据 `multipart/related; type="application/octet-stream"`。新版另定义了 `accept`/`charset` 查询参数，老服务器只认头，库统一走 `Accept` 头（兼容面最大）。
 - **渲染媒体类型**（§8.7.4）：单帧 image/jpeg（基准必须支持）/png/gif/jp2/jxl，多帧 gif/jxl，视频 video/mpeg、video/mp4、video/H265，文本 text/html、text/plain、application/pdf 等；渲染类型**不允许**带 transfer-syntax 参数。
-- **渲染查询参数**：新版为 `annotation`、`quality`、`viewport`、`window`、`iccprofile`；经典部署为 `annotations`、`quality`、`viewport`、`windowcenter`、`windowwidth`、`icccolorspace`（命名差异见 §3 D6）。
+- **渲染查询参数**：新版为 `annotation`、`quality`、`viewport`（vw,vh 即 columns,rows）、`window=center,width,function`（**三值必填**，function 取 linear/linear-exact/sigmoid，缺省 linear）、`iccprofile`；经典部署为 `annotations`、`quality`、`viewport`、`windowcenter`、`windowwidth`、`icccolorspace`（命名差异见 §3 D6）。
 - **BulkDataURI 三种形式**（相对路径解析规则，见 §3 D9）：绝对 URI；带绝对路径的相对 URI（`/dicomweb/studies/...`）；带相对路径的相对 URI（`./bulkdata/...`，相对于**发起元数据请求的路径**）。
 - **状态码**：200；400（请求/参数错误，如 UID 含非法字符）；404（资源不存在）；406（媒体类型不可协商）；410（已删除）；413（过大）；另有 §8.5 公共码（304/501/503 等）。
 - multipart 每 part 通常带 `Content-Location`（指向该实例的资源 URI，可用于命名落盘文件）。
@@ -66,6 +66,7 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 - **响应恒为单段**（非 multipart）：一个 DICOM PS3.10 文件或一张渲染图。
 - 缺省 `contentType` 且 `Accept: */*` 时默认 `image/jpeg`。
 - 状态码：400（如 `requestType` 缺失或非 `WADO`）及 §8.5 公共码。
+- **命名备忘（跟踪用）**：现行表 9.5.1-1 将渲染事务的注释参数 Key 写作 `imageAnnotation`，但同节 URL 模板仍为 `{&annotation}`，§9.4.1.2.2 亦为 `annotation`，dcm4chee 实现亦为 `annotation`——属标准文本内部不一致，库按 `annotation` 实现，跟踪后续 CP。`transferSyntax` 同样支持通配符 `*`。
 
 ### 2.3 新旧版本差异汇总（兼容策略的依据）
 
@@ -463,3 +464,21 @@ M1–M4 + M5 核心已全部实现，46 个单元/httptest 测试全绿（`go ve
    - WriteToDir 对重复 Content-Location 回退序号命名、复制失败清理截断文件；
    - 杂项：rendered quality 1..100 本地校验、window 数值去指数格式化、
      `UIDError.Reason` 导出、`application/dicom` 大小写归一、`Core.Do` 的 body 重放约束文档化。
+
+7. **代码走查修复（2026-09 第二轮，逐条对照现行标准文本核查）**：
+   - **协议一致性**：
+     - `transfer-syntax` 参数放行标准通配符 `*`（WADO-RS Accept 与 WADO-URI 查询参数两处，原先被 UID 白名单误拒）；
+     - modern 模式 `window` 参数补齐为 `center,width,function` 三值（§8.3.5 要求三值必填，缺省 linear），新增 `WithWindowFunction`（linear/linear-exact/sigmoid，本地校验），classic 模式无此概念不受影响；
+     - metadata 请求不再附带 `transfer-syntax`（dicom+json 无传输语法，原实现属非标参数）；
+     - WADO-URI 渲染专用参数（frameNumber/imageQuality/rows/columns/region）与 `application/dicom` 组合时本地拒绝（§9.5：仅渲染事务有效）；`FrameNumber` 0 值语义（未设置）文档化。
+   - **性能/保真**：
+     - 元数据 BulkDataURI 改写改用 `json.Decoder.UseNumber()`，数字字面量跨 decode/re-encode 往返保持逐位保真；
+     - 元数据改为逐 part 解析（数组 part 贡献元素、裸对象 part 贡献自身），修复"每 part 一数据集"的老服务器产出非法拼接 JSON 的问题；
+     - `partFilename` 剥离 Content-Location 的 query/fragment，带参 URI 仍按 UID 命名落盘。
+   - **代码质量**：
+     - `StatusError`/`UIDError` 报文截断改为 UTF-8 安全（不切碎多字节字符，非法序列替换为 U+FFFD）；
+     - `StatusError.Header` 脱敏 `Set-Cookie`（错误值会进入日志/缺陷报告）；
+     - rendered 响应 `Header` 统一 Clone（与 wadouri.Response 一致）；
+     - `multi.ErrUnknownKey` 改用 `errors.New`；`DiscardLogger` 改用 `slog.DiscardHandler`（Go 1.24+）；
+     - `WithLenientUID` 注明路径穿越风险；`wadouri.New` 注明端点 URL 的 query/fragment 会被丢弃；
+     - dicomx 包注释统一为英文（兑现 §9.5 的注释语言约定）。

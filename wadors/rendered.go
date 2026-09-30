@@ -15,12 +15,21 @@ import (
 // RenderedOption customizes rendered retrieval.
 type RenderedOption func(*renderedCfg)
 
+// Window LUT function keywords of the modern window parameter, which per
+// PS3.18 §8.3.5 is window=center,width,function (all three values mandatory).
+const (
+	WindowFunctionLinear      = "linear"
+	WindowFunctionLinearExact = "linear-exact"
+	WindowFunctionSigmoid     = "sigmoid"
+)
+
 type renderedCfg struct {
 	format      string
 	quality     int
 	viewport    [2]int
 	window      [2]float64
 	hasWindow   bool
+	voiFunction string
 	annotations []string
 	icc         string
 	raw         url.Values
@@ -46,6 +55,15 @@ func WithQuality(q int) RenderedOption {
 // State is the caller's responsibility).
 func WithWindow(center, width float64) RenderedOption {
 	return func(c *renderedCfg) { c.window = [2]float64{center, width}; c.hasWindow = true }
+}
+
+// WithWindowFunction selects the VOI LUT function carried by the modern
+// window parameter: WindowFunctionLinear (the default when unset),
+// WindowFunctionLinearExact or WindowFunctionSigmoid. The classic
+// windowcenter/windowwidth pair has no function component, so the value is
+// ignored in classic mode.
+func WithWindowFunction(fn string) RenderedOption {
+	return func(c *renderedCfg) { c.voiFunction = fn }
 }
 
 // WithAnnotation sets burnt-in annotations; kinds must be from
@@ -91,7 +109,11 @@ func (cfg renderedCfg) query(modern bool) url.Values {
 			q.Set("annotation", strings.Join(cfg.annotations, ","))
 		}
 		if cfg.hasWindow {
-			q.Set("window", formatFloat(cfg.window[0])+","+formatFloat(cfg.window[1]))
+			fn := cfg.voiFunction
+			if fn == "" {
+				fn = WindowFunctionLinear
+			}
+			q.Set("window", formatFloat(cfg.window[0])+","+formatFloat(cfg.window[1])+","+fn)
 		}
 		if cfg.icc != "" {
 			q.Set("iccprofile", cfg.icc)
@@ -183,6 +205,11 @@ func (c *Client) retrieveRendered(ctx context.Context, u *url.URL, opts []Render
 			return nil, &wado.RequestError{Field: "annotation", Reason: fmt.Sprintf("unknown kind %q", a)}
 		}
 	}
+	switch cfg.voiFunction {
+	case "", WindowFunctionLinear, WindowFunctionLinearExact, WindowFunctionSigmoid:
+	default:
+		return nil, &wado.RequestError{Field: "windowFunction", Reason: fmt.Sprintf("unknown function %q", cfg.voiFunction)}
+	}
 	if cfg.quality != 0 && (cfg.quality < 1 || cfg.quality > 100) {
 		return nil, &wado.RequestError{Field: "quality", Reason: "must be within 1..100"}
 	}
@@ -208,7 +235,7 @@ func (c *Client) retrieveRendered(ctx context.Context, u *url.URL, opts []Render
 		if p.ct != "" {
 			ct = p.ct
 		}
-		return &Rendered{ContentType: ct, Body: p, Header: resp.Header, resp: resp}, nil
+		return &Rendered{ContentType: ct, Body: p, Header: resp.Header.Clone(), resp: resp}, nil
 	}
-	return &Rendered{ContentType: ct, Body: resp.Body, Header: resp.Header, resp: resp}, nil
+	return &Rendered{ContentType: ct, Body: resp.Body, Header: resp.Header.Clone(), resp: resp}, nil
 }

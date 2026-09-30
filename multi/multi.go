@@ -20,6 +20,7 @@ package multi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -71,7 +72,7 @@ func (f ResolverFunc[K]) Resolve(ctx context.Context, key K) (Endpoint, error) {
 }
 
 // ErrUnknownKey is the sentinel root cause of Static lookup failures.
-var ErrUnknownKey = fmt.Errorf("multi: unknown key")
+var ErrUnknownKey = errors.New("multi: unknown key")
 
 // Static is a static mapping (typically loaded from a config file or DB).
 type Static[K comparable] map[K]Endpoint

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestCoreHeadersAndAuth(t *testing.T) {
@@ -193,6 +194,40 @@ func TestNewStatusError(t *testing.T) {
 	retryable := &StatusError{StatusCode: http.StatusServiceUnavailable}
 	if !retryable.IsRetryable() {
 		t.Error("503 must be retryable")
+	}
+}
+
+// TestStatusErrorRedactionAndTruncation guards the error-hygiene contract:
+// Set-Cookie never leaks into the retained headers, and the echoed body is
+// truncated to 4KB without splitting multi-byte runes.
+func TestStatusErrorRedactionAndTruncation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Set-Cookie", "SESSIONID=topsecret; HttpOnly")
+		w.WriteHeader(http.StatusForbidden)
+		// 66 CJK runes (198 bytes) plus one more rune cut in half by the
+		// 200-byte message truncation, then filler.
+		_, _ = w.Write([]byte(strings.Repeat("检", 66) + "查" + strings.Repeat("x", 8192)))
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	resp, err := NewCore().Do(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	se := NewStatusError(req, resp)
+	if _, ok := se.Header["Set-Cookie"]; ok {
+		t.Error("Set-Cookie leaked into StatusError.Header")
+	}
+	msg := se.Error()
+	if !utf8.ValidString(msg) {
+		t.Errorf("StatusError.Error() is not valid UTF-8: %q", msg)
+	}
+	if !strings.Contains(msg, strings.Repeat("检", 10)) {
+		t.Errorf("StatusError.Error() lost the readable prefix: %q", msg)
+	}
+	if len(se.Body) > 4096 {
+		t.Errorf("body = %d bytes, want <= 4096", len(se.Body))
 	}
 }
 

@@ -96,6 +96,10 @@ func WithLogHandler(h slog.Handler) Option { return WithLogger(slog.New(h)) }
 
 // WithLenientUID disables local UID whitelist validation (escape hatch for
 // private gateways that accept non-conformant UIDs).
+//
+// Caution: values that would have been rejected now reach the request path
+// verbatim; a hostile caller could craft a UID containing "../" or "?" that
+// escapes the intended resource prefix. Only use with trusted callers.
 func WithLenientUID() Option { return func(s *settings) { s.lenientUID = true } }
 
 // WithModernParamNames switches rendered/anonymize parameters to the 2023+

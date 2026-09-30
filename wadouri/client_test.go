@@ -18,6 +18,8 @@ const (
 	testSeriesUID       = "1.2.4"
 	testObjectUID       = "1.2.5"
 	testPresentationUID = "1.2.9"
+	// testContentTypeDICOM selects the DICOM instance transaction.
+	testContentTypeDICOM = "application/dicom"
 )
 
 func TestRetrieveIntegration(t *testing.T) {
@@ -28,7 +30,7 @@ func TestRetrieveIntegration(t *testing.T) {
 			t.Errorf("path = %q, want the configured endpoint", r.URL.Path)
 		}
 		gotQuery, gotAccept = r.URL.Query(), r.Header.Get("Accept")
-		w.Header().Set("Content-Type", "application/dicom")
+		w.Header().Set("Content-Type", testContentTypeDICOM)
 		_, _ = w.Write([]byte("DICOMFILE"))
 	}))
 	defer srv.Close()
@@ -53,7 +55,7 @@ func TestRetrieveIntegration(t *testing.T) {
 	if gotQuery.Get("studyUID") != testStudyUID || gotQuery.Get("seriesUID") != testSeriesUID || gotQuery.Get("objectUID") != testObjectUID {
 		t.Errorf("UID query = %v", gotQuery)
 	}
-	if gotAccept != "application/dicom" {
+	if gotAccept != testContentTypeDICOM {
 		t.Errorf("Accept = %q", gotAccept)
 	}
 	if !resp.IsDICOM() {
@@ -69,7 +71,7 @@ func TestRetrieveModernAnonymize(t *testing.T) {
 	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
-		w.Header().Set("Content-Type", "application/dicom")
+		w.Header().Set("Content-Type", testContentTypeDICOM)
 	}))
 	defer srv.Close()
 

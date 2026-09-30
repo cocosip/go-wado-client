@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 var (
@@ -28,11 +29,7 @@ func (e *StatusError) Error() string {
 	if len(e.Body) == 0 {
 		return fmt.Sprintf("wado: %s %s: %s", e.Method, e.URL, e.Status)
 	}
-	msg := string(e.Body)
-	if len(msg) > 200 {
-		msg = msg[:200]
-	}
-	return fmt.Sprintf("wado: %s %s: %s: %s", e.Method, e.URL, e.Status, msg)
+	return fmt.Sprintf("wado: %s %s: %s: %s", e.Method, e.URL, e.Status, truncateUTF8(string(e.Body), 200))
 }
 
 // IsNotFound reports HTTP 404 Not Found.
@@ -65,19 +62,23 @@ func (e *StatusError) IsRetryable() bool {
 }
 
 // NewStatusError drains the (truncated) error response body, closes resp and
-// returns a StatusError.
+// returns a StatusError. Set-Cookie is dropped from the retained headers:
+// error values end up in logs and bug reports, where session cookies are
+// noise at best and a credential leak at worst.
 func NewStatusError(req *http.Request, resp *http.Response) *StatusError {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	_ = resp.Body.Close()
 	if len(body) > 4096 {
 		body = body[:4096]
 	}
+	header := resp.Header.Clone()
+	header.Del("Set-Cookie")
 	return &StatusError{
 		StatusCode: resp.StatusCode,
 		Status:     resp.Status,
 		Method:     req.Method,
 		URL:        req.URL.String(),
-		Header:     resp.Header.Clone(),
+		Header:     header,
 		Body:       body,
 	}
 }
@@ -92,12 +93,22 @@ type UIDError struct {
 func (e *UIDError) Error() string {
 	uid := e.UID
 	if len(uid) > 32 {
-		uid = uid[:32] + "..."
+		uid = truncateUTF8(uid, 32) + "..."
 	}
 	return fmt.Sprintf("wado: invalid UID for %s (%s): %q", e.Field, e.Reason, uid)
 }
 
 func (e *UIDError) Unwrap() error { return ErrInvalidUID }
+
+// truncateUTF8 shortens s to at most limit bytes without splitting a
+// multi-byte rune; invalid sequences (binary error bodies) become U+FFFD
+// instead of corrupting the surrounding text.
+func truncateUTF8(s string, limit int) string {
+	if len(s) > limit {
+		s = s[:limit]
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
 
 // RequestError reports a request that failed local validation (cases where
 // the standard mandates a 400 from the server are rejected up front).
