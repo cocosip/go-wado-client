@@ -37,7 +37,7 @@ func WithViewport(cols, rows int) RenderedOption {
 	return func(c *renderedCfg) { c.viewport = [2]int{cols, rows} }
 }
 
-// WithQuality sets the lossy compression quality.
+// WithQuality sets the lossy compression quality (1..100).
 func WithQuality(q int) RenderedOption {
 	return func(c *renderedCfg) { c.quality = q }
 }
@@ -91,7 +91,7 @@ func (cfg renderedCfg) query(modern bool) url.Values {
 			q.Set("annotation", strings.Join(cfg.annotations, ","))
 		}
 		if cfg.hasWindow {
-			q.Set("window", fmt.Sprintf("%g,%g", cfg.window[0], cfg.window[1]))
+			q.Set("window", formatFloat(cfg.window[0])+","+formatFloat(cfg.window[1]))
 		}
 		if cfg.icc != "" {
 			q.Set("iccprofile", cfg.icc)
@@ -120,6 +120,8 @@ func (cfg renderedCfg) query(modern bool) url.Values {
 	return q
 }
 
+// formatFloat renders a float without exponent notation — some servers fail
+// to parse values like "1e+07".
 func formatFloat(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
@@ -181,7 +183,9 @@ func (c *Client) retrieveRendered(ctx context.Context, u *url.URL, opts []Render
 			return nil, &wado.RequestError{Field: "annotation", Reason: fmt.Sprintf("unknown kind %q", a)}
 		}
 	}
-	u = u.JoinPath()
+	if cfg.quality != 0 && (cfg.quality < 1 || cfg.quality > 100) {
+		return nil, &wado.RequestError{Field: "quality", Reason: "must be within 1..100"}
+	}
 	u.RawQuery = cfg.query(c.core.ModernParams()).Encode()
 
 	resp, err := c.do(ctx, u, func(req *http.Request) { req.Header.Set("Accept", format) })

@@ -135,6 +135,47 @@ func TestRenderedValidation(t *testing.T) {
 	if !errors.Is(err, wado.ErrInvalidRequest) {
 		t.Errorf("unknown annotation err = %v, want ErrInvalidRequest", err)
 	}
+	for _, q := range []int{-1, 101} {
+		_, err = c.RetrieveRenderedInstance(ctx, "1.2.3", "1.2.4", "1.2.5", WithQuality(q))
+		if !errors.Is(err, wado.ErrInvalidRequest) {
+			t.Errorf("quality %d err = %v, want ErrInvalidRequest", q, err)
+		}
+	}
+}
+
+// TestRenderedWindowFormatNoExponent verifies window values never reach the
+// wire in exponent notation ("1e+07"), which some servers cannot parse.
+func TestRenderedWindowFormatNoExponent(t *testing.T) {
+	var got captured
+	srv := newRenderedServer(t, &got)
+	defer srv.Close()
+
+	// Classic names.
+	c, _ := New(srv.URL + "/api/wado/H1")
+	img, err := c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
+		WithWindow(1e7, 4e7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = img.Close()
+	if v := got.query.Get("windowcenter"); v != "10000000" {
+		t.Errorf("windowcenter = %q, want 10000000", v)
+	}
+	if v := got.query.Get("windowwidth"); v != "40000000" {
+		t.Errorf("windowwidth = %q, want 40000000", v)
+	}
+
+	// Modern names.
+	c, _ = New(srv.URL+"/api/wado/H1", wado.WithModernParamNames())
+	img, err = c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
+		WithWindow(1e7, 4e7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = img.Close()
+	if v := got.query.Get("window"); v != "10000000,40000000" {
+		t.Errorf("window = %q, want 10000000,40000000", v)
+	}
 }
 
 func TestRetrieveRenderedFrames(t *testing.T) {

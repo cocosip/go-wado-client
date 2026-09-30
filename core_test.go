@@ -195,3 +195,24 @@ func TestNewStatusError(t *testing.T) {
 		t.Error("503 must be retryable")
 	}
 }
+
+// TestSleepBackoffCapsRetryAfter guards against a hostile or buggy gateway
+// stalling the client past the configured ceiling with a huge Retry-After.
+func TestSleepBackoffCapsRetryAfter(t *testing.T) {
+	p := RetryPolicy{
+		MaxAttempts:    3,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     5 * time.Millisecond,
+	}
+	start := time.Now()
+	if err := sleepBackoff(context.Background(), p, 1, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 5*time.Millisecond {
+		t.Errorf("elapsed = %v, want at least the capped 5ms", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("elapsed = %v, Retry-After was not capped at MaxBackoff", elapsed)
+	}
+}

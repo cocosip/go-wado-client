@@ -1,6 +1,7 @@
 package wadors
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,7 +65,21 @@ func (c *Client) metadataList(ctx context.Context, u *url.URL, opts []RetrieveOp
 	return out, nil
 }
 
+// metadataDataset parses one metadata item. Instance-level responses are
+// accepted in both deployed forms: the single-element JSON array that
+// conformant servers return ([dataset] — Orthanc, dcm4che and the
+// dicomweb-client reference) and a bare object.
 func metadataDataset(raw json.RawMessage, reqURL *url.URL) (*dataset.Dataset, error) {
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, fmt.Errorf("wadors: decode metadata: %w", err)
+		}
+		if len(items) != 1 {
+			return nil, fmt.Errorf("wadors: instance metadata: expected a single item, got %d", len(items))
+		}
+		raw = items[0]
+	}
 	fixed, err := resolveBulkDataURIsJSON(raw, reqURL)
 	if err != nil {
 		return nil, err
@@ -125,6 +140,15 @@ func (c *Client) fetchMetadata(ctx context.Context, u *url.URL, opts []RetrieveO
 // of the metadata request that produced it — this is WADO-specific URL
 // rewriting; every aspect of interpreting dicom+json stays with go-dicom.
 func resolveBulkDataURIsJSON(raw json.RawMessage, base *url.URL) (json.RawMessage, error) {
+	// Fast path: items not mentioning the key skip the decode / walk /
+	// re-encode round trip entirely (a decode-rewrite-recode pass would
+	// otherwise cost several times the response size on large studies). The
+	// substring probe is a safe superset filter: if the bytes are absent the
+	// key cannot be present, and a false positive (the text inside some other
+	// value) just falls through to the walk, which finds nothing to change.
+	if !bytes.Contains(raw, []byte("BulkDataURI")) {
+		return raw, nil
+	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return nil, fmt.Errorf("wadors: decode metadata json: %w", err)

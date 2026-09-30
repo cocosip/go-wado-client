@@ -169,7 +169,7 @@ type StatusError struct {
 
 ### D8. 重试（默认关闭）
 
-GET 幂等，`WithRetry(RetryPolicy{MaxAttempts, InitialBackoff, MaxBackoff, Jitter})` 只对网络错误、429、502/503/504 重试，尊重 `Retry-After` 与 context 取消。
+GET 幂等，`WithRetry(RetryPolicy{MaxAttempts, InitialBackoff, MaxBackoff, Jitter})` 只对网络错误、429、502/503/504 重试，尊重 `Retry-After`（封顶于 MaxBackoff，防止异常网关拖死客户端）与 context 取消；`Jitter` 为每次重试附加的随机抖动上界（防惊群，0 关闭）。
 
 ### D9. BulkDataURI 相对路径解析（标准三种形式）
 
@@ -453,3 +453,13 @@ M1–M4 + M5 核心已全部实现，46 个单元/httptest 测试全绿（`go ve
 
 仍按初稿挂起的项：thumbnail / pixeldata / renderedmpr / rendered3d 等新版可选资源（D6 透传可兜底）、
 真机兼容冒烟（Orthanc / dcm4chee）。
+
+6. **代码走查修复（2026-09）**：
+   - 实例元数据兼容单元素数组形式（Orthanc / dcm4che / dicomweb-client 的主流行为），多元素数组给出明确报错；
+   - WADO-URI 必填 UID 三元组本地校验（原实现漏掉"必填"，与 §5.3 不符）；
+   - Retry-After 以 MaxBackoff 封顶，RetryPolicy 落实初稿的 Jitter 字段；
+   - 元数据 BulkDataURI 改写增加无键快路径（子串探测跳过 decode/walk/re-encode）；
+   - multi.Registry 锁外 Resolve + double-check 回填，慢 Resolver 不再阻塞其他租户的缓存命中；
+   - WriteToDir 对重复 Content-Location 回退序号命名、复制失败清理截断文件；
+   - 杂项：rendered quality 1..100 本地校验、window 数值去指数格式化、
+     `UIDError.Reason` 导出、`application/dicom` 大小写归一、`Core.Do` 的 body 重放约束文档化。

@@ -128,11 +128,19 @@ func (m *Multipart) WriteToDir(dir string) ([]string, error) {
 		return nil, err
 	}
 	var files []string
+	written := map[string]bool{}
 	for p, err := range m.Parts() {
 		if err != nil {
 			return files, err
 		}
 		full := filepath.Join(dir, partFilename(p))
+		if written[full] {
+			// Duplicate Content-Location (a server returning the same
+			// instance twice): fall back to the unique part index instead of
+			// silently overwriting the earlier part. The indexed name can
+			// never collide in turn — "part-..." is not a valid UID.
+			full = filepath.Join(dir, fmt.Sprintf("part-%06d.dcm", p.n))
+		}
 		f, err := os.Create(full)
 		if err != nil {
 			return files, err
@@ -140,11 +148,13 @@ func (m *Multipart) WriteToDir(dir string) ([]string, error) {
 		_, cpErr := io.Copy(f, p)
 		clErr := f.Close()
 		if cpErr != nil {
+			_ = os.Remove(full) // never leave a truncated file behind
 			return files, cpErr
 		}
 		if clErr != nil {
 			return files, clErr
 		}
+		written[full] = true
 		files = append(files, full)
 	}
 	return files, nil

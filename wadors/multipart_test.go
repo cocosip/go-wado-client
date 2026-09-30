@@ -115,6 +115,42 @@ func TestMultipartWriteToDir(t *testing.T) {
 	}
 }
 
+// TestMultipartWriteToDirDuplicateLocation guards the deduplication when a
+// server returns the same Content-Location twice: the second part falls back
+// to its index instead of overwriting the first file.
+func TestMultipartWriteToDirDuplicateLocation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loc := "http://" + r.Host + "/dicomweb/studies/1.2.840.1/series/2.3/instances/1.2.840.777"
+		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="application/dicom"`)
+		_, _ = w.Write(multipartBody([]fakePart{
+			{ct: mediaTypeDICOM, loc: loc, body: dicomData1},
+			{ct: mediaTypeDICOM, loc: loc, body: dicomData2},
+		}))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/dicomweb")
+	mp, err := c.RetrieveStudy(context.Background(), "1.2.840.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mp.Close() }()
+
+	files, err := mp.WriteToDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files = %v, want 2", files)
+	}
+	if filepath.Base(files[0]) != "1.2.840.777.dcm" {
+		t.Errorf("file[0] = %q, want 1.2.840.777.dcm", filepath.Base(files[0]))
+	}
+	if filepath.Base(files[1]) != "part-000002.dcm" {
+		t.Errorf("file[1] = %q, want part-000002.dcm (no overwrite)", filepath.Base(files[1]))
+	}
+}
+
 // TestMultipartSinglePartTolerance verifies the fallback for servers that
 // answer instance retrieval with a bare application/dicom body.
 func TestMultipartSinglePartTolerance(t *testing.T) {

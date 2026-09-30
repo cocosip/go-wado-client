@@ -63,6 +63,17 @@ type Request struct {
 // validate performs local validation, rejecting up front the cases where
 // the standard mandates a server-side 400.
 func (r Request) validate(checkUID func(field, uid string) error) error {
+	// The mandatory identification triple: the server must reject requests
+	// missing any of them.
+	for _, f := range []struct{ field, uid string }{
+		{"StudyUID", r.StudyUID},
+		{"SeriesUID", r.SeriesUID},
+		{"ObjectUID", r.ObjectUID},
+	} {
+		if f.uid == "" {
+			return &wado.RequestError{Field: f.field, Reason: "is required"}
+		}
+	}
 	for _, f := range []struct{ field, uid string }{
 		{"studyUID", r.StudyUID},
 		{"seriesUID", r.SeriesUID},
@@ -89,7 +100,8 @@ func (r Request) validate(checkUID func(field, uid string) error) error {
 	if hasWindow && hasPres {
 		return &wado.RequestError{Field: "WindowCenter", Reason: "windowing and presentation state are mutually exclusive"}
 	}
-	isDICOM := r.ContentType == "" || r.ContentType == "application/dicom"
+	isDICOM := r.ContentType == "" ||
+		strings.EqualFold(strings.TrimSpace(r.ContentType), "application/dicom")
 	if hasWindow && isDICOM {
 		return &wado.RequestError{Field: "WindowCenter", Reason: "windowing requires a rendered contentType"}
 	}

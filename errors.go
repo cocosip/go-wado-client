@@ -86,7 +86,7 @@ func NewStatusError(req *http.Request, resp *http.Response) *StatusError {
 type UIDError struct {
 	Field  string
 	UID    string
-	reason string
+	Reason string
 }
 
 func (e *UIDError) Error() string {
@@ -94,7 +94,7 @@ func (e *UIDError) Error() string {
 	if len(uid) > 32 {
 		uid = uid[:32] + "..."
 	}
-	return fmt.Sprintf("wado: invalid UID for %s (%s): %q", e.Field, e.reason, uid)
+	return fmt.Sprintf("wado: invalid UID for %s (%s): %q", e.Field, e.Reason, uid)
 }
 
 func (e *UIDError) Unwrap() error { return ErrInvalidUID }

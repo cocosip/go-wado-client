@@ -155,12 +155,19 @@ func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) *R
 
 // Client returns the Gateway for the key (created lazily and cached) — the
 // business key appears here and nowhere else.
+//
+// Resolution runs outside the registry lock: a slow Resolver (database /
+// config-service lookup) must not block cache hits for other keys.
+// Concurrent misses on the same key may each build a Gateway; the first to
+// finish wins the cache and the others get that instance.
 func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if g, ok := r.cache[key]; ok {
+	g, ok := r.cache[key]
+	r.mu.Unlock()
+	if ok {
 		return g, nil
 	}
+
 	ep, err := r.resolver.Resolve(ctx, key)
 	if err != nil {
 		return nil, err
@@ -169,7 +176,7 @@ func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 		return nil, fmt.Errorf("multi: endpoint for key %v sets neither RSRoute nor URIRoute", key)
 	}
 	core := r.base.Fork(ep.Options...)
-	g := &Gateway{}
+	g = &Gateway{}
 	if ep.RSRoute != "" {
 		full, err := joinRoute(ep.Base, ep.RSRoute)
 		if err != nil {
@@ -188,7 +195,14 @@ func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 			return nil, err
 		}
 	}
+
+	r.mu.Lock()
+	if cached, ok := r.cache[key]; ok {
+		r.mu.Unlock()
+		return cached, nil
+	}
 	r.cache[key] = g
+	r.mu.Unlock()
 	return g, nil
 }
 

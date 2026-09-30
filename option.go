@@ -77,8 +77,8 @@ func WithRequestEditor(fn func(*http.Request) error) Option {
 }
 
 // WithRetry enables transport-level retry (off by default). Only network
-// errors and 429/502/503/504 are retried, honoring Retry-After and context
-// cancellation.
+// errors and 429/502/503/504 are retried. Retry-After is honored but capped
+// at MaxBackoff; retries respect context cancellation.
 func WithRetry(p RetryPolicy) Option {
 	return func(s *settings) { cp := p; s.retry = &cp }
 }
@@ -108,7 +108,11 @@ func WithModernParamNames() Option { return func(s *settings) { s.modernParams =
 type RetryPolicy struct {
 	MaxAttempts    int           // total attempts including the first; <=1 disables retry
 	InitialBackoff time.Duration // backoff before the first retry; 0 selects the 100ms default
-	MaxBackoff     time.Duration // upper bound; values below InitialBackoff are clamped
+	MaxBackoff     time.Duration // upper bound; values below InitialBackoff are clamped. Retry-After is also capped here
+	// Jitter is an upper bound of extra random delay added to each retry
+	// sleep, spreading simultaneous client retries after a shared failure
+	// (thundering herd); 0 disables it.
+	Jitter time.Duration
 }
 
 func (p RetryPolicy) normalized() RetryPolicy {

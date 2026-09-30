@@ -77,6 +77,9 @@ img, _ := c.RetrieveRenderedInstance(ctx, study, series, sop,
 bulk, _ := c.FetchBulkData(ctx, uriFromMetadata)
 ```
 
+Note: frame lists travel in the URL — for very large lists (thousands of
+frames) batch the calls, or gateways will answer 414 URL Too Long.
+
 ## WADO-URI
 
 ```go

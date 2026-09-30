@@ -26,6 +26,9 @@ func TestRequestValidate(t *testing.T) {
 		name string
 		req  Request
 	}{
+		{"missing studyUID", Request{SeriesUID: testSeriesUID, ObjectUID: testObjectUID}},
+		{"missing seriesUID", Request{StudyUID: testStudyUID, ObjectUID: testObjectUID}},
+		{"missing objectUID", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID}},
 		{"window center only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, WindowCenter: &wc}},
 		{"window width only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, WindowWidth: &ww}},
 		{"presentation uid only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, PresentationUID: testPresentationUID}},
@@ -33,6 +36,8 @@ func TestRequestValidate(t *testing.T) {
 			WindowCenter: &wc, WindowWidth: &ww, PresentationUID: testPresentationUID, PresentationSeriesUID: "1.2.10"}},
 		{"window with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: "application/dicom", WindowCenter: &wc, WindowWidth: &ww}},
+		{"window with case-varied dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: "Application/DICOM", WindowCenter: &wc, WindowWidth: &ww}},
 		{"rows only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Rows: 512}},
 		{"region out of range", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			Region: &[4]float64{0.5, 0.1, 0.4, 0.9}}},

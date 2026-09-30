@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cocosip/go-wado-client/wadouri"
 )
@@ -276,5 +278,84 @@ func TestEndpointValidation(t *testing.T) {
 	}
 	if _, err := reg.Client(ctx, "nobase"); err == nil {
 		t.Error("route without base expected error")
+	}
+}
+
+// TestRegistryResolveOutsideLock verifies that a slow Resolver (database /
+// config-service lookup in real deployments) does not block cache hits for
+// other keys.
+func TestRegistryResolveOutsideLock(t *testing.T) {
+	release := make(chan struct{})
+	reg := NewRegistry(ResolverFunc[string](func(_ context.Context, key string) (Endpoint, error) {
+		if key == "slow" {
+			<-release
+		}
+		return Endpoint{Base: "https://gw.example.com", RSRoute: "/rs"}, nil
+	}))
+
+	// Warm the cache for "fast" before "slow" starts resolving.
+	if _, err := reg.Client(context.Background(), "fast"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := reg.Client(context.Background(), "slow")
+		done <- err
+	}()
+
+	// While "slow" sits inside its resolver, the cached "fast" lookup must
+	// still succeed (it would deadlock against a lock held during resolve).
+	time.Sleep(50 * time.Millisecond)
+	cacheDone := make(chan error, 1)
+	go func() {
+		_, err := reg.Client(context.Background(), "fast")
+		cacheDone <- err
+	}()
+	select {
+	case err := <-cacheDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cache hit blocked behind a slow resolve")
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRegistryConcurrentSameKey verifies concurrent misses on one key all
+// end up with the cached Gateway instance.
+func TestRegistryConcurrentSameKey(t *testing.T) {
+	srv := newFakeGateway(t)
+	defer srv.Close()
+
+	key := routeKey{Tenant: "a", Biz: "b"}
+	reg := NewRegistry(Static[routeKey](map[routeKey]Endpoint{
+		key: endpoint(srv.URL, "/x"),
+	}))
+
+	results := make([]*Gateway, 8)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			g, err := reg.Client(context.Background(), key)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			results[i] = g
+		}(i)
+	}
+	wg.Wait()
+	for i, g := range results {
+		if g == nil || g != results[0] {
+			t.Fatalf("result[%d] differs from result[0]: concurrent same-key clients must share the cached Gateway", i)
+		}
 	}
 }

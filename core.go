@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -131,6 +132,10 @@ func defaultTransport() *http.Transport {
 // Do sends the request: editors (so tokens refresh) and the User-Agent are
 // applied before every attempt, and network errors plus 429/502/503/504 are
 // retried with backoff according to the configured policy.
+//
+// Requests carrying a body must make it replayable: every attempt shares the
+// original req.Body reader as-is. All requests issued by this library are
+// bodyless GETs.
 func (c *Core) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	p := c.retry.normalized()
 	for attempt := 1; ; attempt++ {
@@ -213,8 +218,17 @@ func sleepBackoff(ctx context.Context, p RetryPolicy, attempt int, retryAfter ti
 	if bo <= 0 || bo > p.MaxBackoff {
 		bo = p.MaxBackoff
 	}
+	// Retry-After is honored but capped at MaxBackoff: a hostile or buggy
+	// gateway must not be able to stall the client past the configured
+	// ceiling.
+	if retryAfter > p.MaxBackoff {
+		retryAfter = p.MaxBackoff
+	}
 	if retryAfter > bo {
 		bo = retryAfter
+	}
+	if p.Jitter > 0 {
+		bo += time.Duration(rand.Int64N(int64(p.Jitter)))
 	}
 	if bo <= 0 {
 		return nil
@@ -235,7 +249,7 @@ func (c *Core) CheckUID(field, uid string) error {
 		return nil
 	}
 	if err := ValidateUID(uid); err != nil {
-		return &UIDError{Field: field, UID: uid, reason: err.Error()}
+		return &UIDError{Field: field, UID: uid, Reason: err.Error()}
 	}
 	return nil
 }
