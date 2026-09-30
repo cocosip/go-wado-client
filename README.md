@@ -170,6 +170,28 @@ Notes:
   deliberately no overall client timeout — control large Study downloads
   with `context`.
 
+## Runnable examples
+
+Complete, runnable walkthroughs live under [`examples/`](examples/) — they
+cover every implemented method of both clients. Point them at your gateway
+(only the retrieval calls talk on the network):
+
+```sh
+# WADO-RS: all 13 client methods — study/series/instance retrieval,
+# metadata, frames, rendered images, bulk data, options, error handling
+go run ./examples/wadors -base https://gw.example.com/api/wado/H0001/wado-rs -study <studyUID>
+
+# WADO-URI: both transactions with the full Request parameter set
+go run ./examples/wadouri -endpoint https://gw.example.com/api/wado/H0001/wado-uri \
+    -study <studyUID> -series <seriesUID> -object <sopUID>
+
+# multi registry wired to the hospital route template
+#   api/wado/{hospitalCode}/wado-rs + api/wado/{hospitalCode}/wado-uri
+go run ./examples/multi -gateway https://gw.example.com -hospital H0001 -study <studyUID>
+```
+
+Retrieved files land in the directory given by `-out`.
+
 ## License
 
 MS-PL (to match the go-dicom family).
