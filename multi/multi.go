@@ -136,7 +136,10 @@ func fillRoute(rep *strings.Replacer, pattern string) (string, error) {
 	return s, nil
 }
 
-// Registry caches Gateways by key.
+// Registry caches Gateways by key. The cache has no eviction: it grows by
+// one entry per distinct key, which is fine for the intended key spaces
+// (hospitals / tenants); use Invalidate to drop entries after a route change
+// or credential rotation.
 type Registry[K comparable] struct {
 	resolver Resolver[K]
 	base     *wado.Core
@@ -145,13 +148,18 @@ type Registry[K comparable] struct {
 }
 
 // NewRegistry creates a registry; defaults are the shared settings for all
-// targets (TLS/self-signed CA, timeouts, retry, logging etc.).
-func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) *Registry[K] {
+// targets (TLS/self-signed CA, timeouts, retry, logging etc.). It fails when
+// the defaults are contradictory (see wado.WithTLSClientConfig).
+func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) (*Registry[K], error) {
+	base, err := wado.NewCore(defaults...)
+	if err != nil {
+		return nil, err
+	}
 	return &Registry[K]{
 		resolver: resolver,
-		base:     wado.NewCore(defaults...),
+		base:     base,
 		cache:    map[K]*Gateway{},
-	}
+	}, nil
 }
 
 // Client returns the Gateway for the key (created lazily and cached) — the
@@ -176,7 +184,10 @@ func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 	if ep.RSRoute == "" && ep.URIRoute == "" {
 		return nil, fmt.Errorf("multi: endpoint for key %v sets neither RSRoute nor URIRoute", key)
 	}
-	core := r.base.Fork(ep.Options...)
+	core, err := r.base.Fork(ep.Options...)
+	if err != nil {
+		return nil, err
+	}
 	g = &Gateway{}
 	if ep.RSRoute != "" {
 		full, err := joinRoute(ep.Base, ep.RSRoute)

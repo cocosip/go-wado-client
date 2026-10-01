@@ -99,9 +99,11 @@ if resp.IsDICOM() { io.Copy(f, resp.Body) }
 ```
 
 Local validation rejects up front everything the standard says a server must
-answer with 400 (window pair/presentation pair/mutual exclusion, region
-bounds, rendered-only parameters combined with application/dicom, UID
-whitelist).
+answer with 400: the window pair / presentation pair and their mutual
+exclusion, the rendered-only parameters (frameNumber, imageQuality,
+rows/columns, region, annotation) combined with `application/dicom`, the
+DICOM-only `anonymize` switch combined with a rendered content type, invalid
+media types, and UID whitelist violations.
 
 ## Multiple hospitals / tenants
 
@@ -115,7 +117,7 @@ type routeKey struct{ Hospital, Biz string }
 
 // One standard base address (no service routing) + one independent route
 // template per service; placeholders are filled from the business key.
-reg := multi.NewRegistry(
+reg, err := multi.NewRegistry(
     multi.Template(
         "https://gw.example.com",
         multi.Routes{
@@ -128,6 +130,7 @@ reg := multi.NewRegistry(
     ),
     wado.WithTLSClientConfig(privateCA),
 )
+if err != nil { log.Fatal(err) }
 
 g, err := reg.Client(ctx, routeKey{Hospital: "H0001", Biz: "RIS"})
 // g.RS  -> https://gw.example.com/api/wado/H0001/RIS/wado-rs/studies/{study}/...

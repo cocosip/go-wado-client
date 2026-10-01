@@ -69,7 +69,10 @@ func run(ctx context.Context, endpoint, studyUID, seriesUID, objectUID, outDir s
 	// Assembly path: build the shared core explicitly so several clients
 	// (here two hospitals' endpoints, in production) share one connection
 	// pool — this is what multi.Registry uses internally.
-	shared := wado.NewCore(clientOptions(insecure)...)
+	shared, err := wado.NewCore(clientOptions(insecure)...)
+	if err != nil {
+		return err
+	}
 	u2, err := wadouri.NewWithCore(shared, endpoint)
 	if err != nil {
 		return err
@@ -126,8 +129,10 @@ func run(ctx context.Context, endpoint, studyUID, seriesUID, objectUID, outDir s
 		Region:       &[4]float64{0.1, 0.1, 0.9, 0.9}, // xmin,ymin,xmax,ymax normalized
 		WindowCenter: &wc, WindowWidth: &ww,
 		Annotation: []string{wadouri.AnnotationPatient, wadouri.AnnotationTechnique},
-		Anonymize:  true,                              // burn in anonymity=yes (anonymize with modern names)
 		Extra:      url.Values{"caller": {"example"}}, // pass-through for private gateway parameters
+		// Anonymize is a DICOM-only parameter (PS3.18 §8.1) — it would be
+		// rejected locally on this rendered request. Use it like this instead:
+		//   u3.Retrieve(ctx, wadouri.Request{..., Anonymize: true})
 	})
 	if err != nil {
 		return fmt.Errorf("retrieve rendered: %w", err)

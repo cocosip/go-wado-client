@@ -146,3 +146,12 @@ func TestForkAndEndpoint(t *testing.T) {
 		t.Errorf("forked Endpoint = %q", f.Endpoint())
 	}
 }
+
+// TestResponseCloseZeroValue pins that Close is safe on the zero value
+// (misuse must not panic).
+func TestResponseCloseZeroValue(t *testing.T) {
+	var r Response
+	if err := r.Close(); err != nil {
+		t.Errorf("Close on zero value = %v, want nil", err)
+	}
+}

@@ -35,7 +35,11 @@ func New(endpoint string, opts ...wado.Option) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{core: wado.NewCore(opts...), ep: u}, nil
+	core, err := wado.NewCore(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{core: core, ep: u}, nil
 }
 
 // NewWithCore creates a client on top of an existing shared core (assembly
@@ -58,7 +62,11 @@ func (c *Client) Fork(endpoint string, opts ...wado.Option) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{core: c.core.Fork(opts...), ep: u}, nil
+	core, err := c.core.Fork(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{core: core, ep: u}, nil
 }
 
 // Endpoint returns the current endpoint URL.
@@ -80,8 +88,16 @@ func (r *Response) IsDICOM() bool {
 	return strings.HasPrefix(ct, "application/dicom")
 }
 
-// Close closes the underlying response.
-func (r *Response) Close() error { return r.resp.Body.Close() }
+// Close closes the underlying response. It is safe on the zero value.
+func (r *Response) Close() error {
+	if r.resp != nil {
+		return r.resp.Body.Close()
+	}
+	if rc, ok := r.Body.(io.Closer); ok {
+		return rc.Close()
+	}
+	return nil
+}
 
 // Retrieve performs the retrieval: local validation first (cases where the
 // standard mandates a server-side 400 are rejected up front), then the GET.

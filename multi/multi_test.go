@@ -2,6 +2,7 @@ package multi
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,8 +12,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocosip/go-wado-client"
 	"github.com/cocosip/go-wado-client/wadouri"
 )
+
+// mustRegistry builds a registry, failing the test on contradictory
+// defaults.
+func mustRegistry[K comparable](t *testing.T, resolver Resolver[K], defaults ...wado.Option) *Registry[K] {
+	t.Helper()
+	reg, err := NewRegistry(resolver, defaults...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
 
 // routeKey is the business-defined composite key (tenant + business line).
 type routeKey struct{ Tenant, Biz string }
@@ -56,7 +69,7 @@ func TestRegistryStaticCompositeKey(t *testing.T) {
 	srv := newFakeGateway(t)
 	defer srv.Close()
 
-	reg := NewRegistry(Static[routeKey](map[routeKey]Endpoint{
+	reg := mustRegistry(t, Static[routeKey](map[routeKey]Endpoint{
 		{Tenant: "hosp-a", Biz: "ct"}: endpoint(srv.URL, "/api/wado/hosp-a/ct"),
 	}))
 
@@ -172,7 +185,7 @@ func TestTemplateFillsBothRoutes(t *testing.T) {
 	}
 
 	// End to end through the registry.
-	reg := NewRegistry(res)
+	reg := mustRegistry(t, res)
 	g, err := reg.Client(context.Background(), routeKey{Tenant: "H1", Biz: "ct"})
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +203,7 @@ func TestRegistryCacheAndInvalidate(t *testing.T) {
 	defer srv.Close()
 
 	key := routeKey{Tenant: "a", Biz: "b"}
-	reg := NewRegistry(Static[routeKey](map[routeKey]Endpoint{
+	reg := mustRegistry(t, Static[routeKey](map[routeKey]Endpoint{
 		key: endpoint(srv.URL, "/x"),
 	}))
 
@@ -227,7 +240,7 @@ func TestURIRouteOnly(t *testing.T) {
 	srv := newFakeGateway(t)
 	defer srv.Close()
 
-	reg := NewRegistry(Static[string](map[string]Endpoint{
+	reg := mustRegistry(t, Static[string](map[string]Endpoint{
 		"legacy": {Base: srv.URL, URIRoute: "/api/wado/legacy/wado-uri"},
 	}))
 	g, err := reg.Client(context.Background(), "legacy")
@@ -250,7 +263,7 @@ func TestRSRouteOnly(t *testing.T) {
 	srv := newFakeGateway(t)
 	defer srv.Close()
 
-	reg := NewRegistry(Static[string](map[string]Endpoint{
+	reg := mustRegistry(t, Static[string](map[string]Endpoint{
 		"modern": {Base: srv.URL, RSRoute: "/api/wado/modern/dicomweb"},
 	}))
 	g, err := reg.Client(context.Background(), "modern")
@@ -268,7 +281,7 @@ func TestRSRouteOnly(t *testing.T) {
 }
 
 func TestEndpointValidation(t *testing.T) {
-	reg := NewRegistry(Static[string](map[string]Endpoint{
+	reg := mustRegistry(t, Static[string](map[string]Endpoint{
 		"empty":  {},              // neither route
 		"nobase": {RSRoute: "/x"}, // route without a base
 	}))
@@ -286,7 +299,7 @@ func TestEndpointValidation(t *testing.T) {
 // other keys.
 func TestRegistryResolveOutsideLock(t *testing.T) {
 	release := make(chan struct{})
-	reg := NewRegistry(ResolverFunc[string](func(_ context.Context, key string) (Endpoint, error) {
+	reg := mustRegistry(t, ResolverFunc[string](func(_ context.Context, key string) (Endpoint, error) {
 		if key == "slow" {
 			<-release
 		}
@@ -334,7 +347,7 @@ func TestRegistryConcurrentSameKey(t *testing.T) {
 	defer srv.Close()
 
 	key := routeKey{Tenant: "a", Biz: "b"}
-	reg := NewRegistry(Static[routeKey](map[routeKey]Endpoint{
+	reg := mustRegistry(t, Static[routeKey](map[routeKey]Endpoint{
 		key: endpoint(srv.URL, "/x"),
 	}))
 
@@ -357,5 +370,23 @@ func TestRegistryConcurrentSameKey(t *testing.T) {
 		if g == nil || g != results[0] {
 			t.Fatalf("result[%d] differs from result[0]: concurrent same-key clients must share the cached Gateway", i)
 		}
+	}
+}
+
+// badRoundTripper is a Transport that is not *http.Transport.
+type badRoundTripper struct{}
+
+func (badRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unreachable")
+}
+
+// TestNewRegistryRejectsBadDefaults verifies that contradictory registry
+// defaults fail at construction instead of at first use.
+func TestNewRegistryRejectsBadDefaults(t *testing.T) {
+	custom := &http.Client{Transport: badRoundTripper{}}
+	_, err := NewRegistry(Static[string](nil),
+		wado.WithHTTPClient(custom), wado.WithTLSClientConfig(&tls.Config{}))
+	if err == nil {
+		t.Error("contradictory defaults expected an error")
 	}
 }

@@ -46,6 +46,17 @@ func TestRequestValidate(t *testing.T) {
 			ContentType: testContentTypeDICOM, Rows: 512, Columns: 512}},
 		{"region with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeDICOM, Region: &[4]float64{0.1, 0.1, 0.9, 0.9}}},
+		// PS3.18 §8.2: annotation is burned into image pixels — rendered-only.
+		{"annotation with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeDICOM, Annotation: []string{AnnotationPatient}}},
+		// PS3.18 §8.1: anonymize applies to DICOM responses only.
+		{"anonymize with rendered content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeJPEG, Anonymize: true}},
+		{"invalid content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: "not a media type"}},
+		// Parameters do not change the classification: still application/dicom.
+		{"window with parameterized dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: "application/dicom; charset=utf-8", WindowCenter: &wc, WindowWidth: &ww}},
 		{"rows only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Rows: 512}},
 		{"region out of range", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			Region: &[4]float64{0.5, 0.1, 0.4, 0.9}}},
@@ -72,6 +83,11 @@ func TestRequestValidate(t *testing.T) {
 			TransferSyntax: "1.2.840.10008.1.2.1"},
 		// The PS3.18 wildcard ("any transfer syntax") is not a UID and passes.
 		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, TransferSyntax: "*"},
+		// Anonymize is the anonymization of the returned DICOM object, so it
+		// combines with application/dicom (explicitly or by omission).
+		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Anonymize: true},
+		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: "application/dicom; charset=utf-8", Anonymize: true},
 	}
 	for _, req := range valid {
 		if err := req.validate(strictCheck); err != nil {

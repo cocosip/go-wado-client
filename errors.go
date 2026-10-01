@@ -77,9 +77,12 @@ func NewStatusError(req *http.Request, resp *http.Response) *StatusError {
 		StatusCode: resp.StatusCode,
 		Status:     resp.Status,
 		Method:     req.Method,
-		URL:        req.URL.String(),
-		Header:     header,
-		Body:       body,
+		// Redacted, like the log path: error values end up in logs and bug
+		// reports, where an HTTP-basic password must not survive. The query
+		// string (UIDs, private parameters) is preserved for diagnostics.
+		URL:    req.URL.Redacted(),
+		Header: header,
+		Body:   body,
 	}
 }
 

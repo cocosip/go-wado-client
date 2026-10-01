@@ -29,6 +29,11 @@ func WithHTTPClient(c *http.Client) Option {
 
 // WithTLSClientConfig sets the TLS configuration (common for hospital
 // self-signed CAs).
+//
+// It composes with WithHTTPClient only when the client's Transport is nil or
+// an *http.Transport (both are cloned, never mutated); otherwise the
+// combination is rejected at construction with an error, because a wrapper
+// RoundTripper offers no way to apply the settings.
 func WithTLSClientConfig(cfg *tls.Config) Option {
 	return func(s *settings) { s.tlsCfg = cfg }
 }

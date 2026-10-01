@@ -68,7 +68,7 @@ func run(ctx context.Context, gateway, hospital, studyUID, outDir string, insecu
 	//
 	// Template fills {hospitalCode} in both routes — independently — from
 	// the business key, then joins each route onto the base address.
-	reg := multi.NewRegistry(
+	reg, err := multi.NewRegistry(
 		multi.Template(gateway,
 			multi.Routes{
 				RS:  "/api/wado/{hospitalCode}/wado-rs",
@@ -80,6 +80,9 @@ func run(ctx context.Context, gateway, hospital, studyUID, outDir string, insecu
 		),
 		clientOptions(insecure)...,
 	)
+	if err != nil {
+		return err
+	}
 	// Alternative resolvers when the routes do not follow one template:
 	//   multi.Static[string](map[string]multi.Endpoint{
 	//       "H0001": {Base: gateway,

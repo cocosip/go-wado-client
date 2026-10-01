@@ -249,7 +249,11 @@ func runRendered(ctx context.Context, c, ic *wadors.Client, opts []wado.Option, 
 	// Rendered on a separately assembled client: wado.NewCore +
 	// NewWithCore is the explicit assembly multi.Registry uses internally,
 	// handy when several clients must share one connection pool.
-	cc2, err := wadors.NewWithCore(wado.NewCore(opts...), c.BaseURL())
+	core, err := wado.NewCore(opts...)
+	if err != nil {
+		return err
+	}
+	cc2, err := wadors.NewWithCore(core, c.BaseURL())
 	if err != nil {
 		return err
 	}

@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        go: ['1.27']
+        go: ['1.26', '1.27']
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -34,17 +34,12 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
-      - name: Run tests (Linux/macOS)
-        if: matrix.os != 'windows-latest'
-        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
-
-      - name: Run tests (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Run tests
         shell: bash
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
       - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27'
         uses: codecov/codecov-action@v7
         with:
           file: ./coverage.txt

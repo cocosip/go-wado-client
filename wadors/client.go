@@ -32,7 +32,11 @@ func New(baseURL string, opts ...wado.Option) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{core: wado.NewCore(opts...), base: u}, nil
+	core, err := wado.NewCore(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{core: core, base: u}, nil
 }
 
 // NewWithCore creates a client on top of an existing shared core (assembly
@@ -56,7 +60,11 @@ func (c *Client) Fork(baseURL string, opts ...wado.Option) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{core: c.core.Fork(opts...), base: u}, nil
+	core, err := c.core.Fork(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{core: core, base: u}, nil
 }
 
 // BaseURL returns the current base URL.

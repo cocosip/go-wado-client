@@ -6,7 +6,10 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +18,26 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+// mustCore builds a core, failing the test on contradictory options.
+func mustCore(t *testing.T, opts ...Option) *Core {
+	t.Helper()
+	c, err := NewCore(opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// mustFork forks a core, failing the test on contradictory options.
+func mustFork(t *testing.T, c *Core, opts ...Option) *Core {
+	t.Helper()
+	f, err := c.Fork(opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
 
 func TestCoreHeadersAndAuth(t *testing.T) {
 	var ua, auth string
@@ -26,7 +49,7 @@ func TestCoreHeadersAndAuth(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	core := NewCore(WithBasicAuth("u", "p"), WithUserAgent("ua-test"))
+	core := mustCore(t, WithBasicAuth("u", "p"), WithUserAgent("ua-test"))
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 	resp, err := core.Do(ctx, req)
 	if err != nil {
@@ -41,7 +64,7 @@ func TestCoreHeadersAndAuth(t *testing.T) {
 		t.Errorf("Authorization = %q, want %q", auth, want)
 	}
 
-	core = NewCore(WithBearerTokenSource(StaticToken("tok")))
+	core = mustCore(t, WithBearerTokenSource(StaticToken("tok")))
 	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 	resp, err = core.Do(ctx, req)
 	if err != nil {
@@ -53,7 +76,7 @@ func TestCoreHeadersAndAuth(t *testing.T) {
 	}
 
 	// Default UA applies when none is configured.
-	core = NewCore()
+	core = mustCore(t)
 	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 	resp, err = core.Do(ctx, req)
 	if err != nil {
@@ -75,7 +98,7 @@ func TestCoreLoggerInjection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	core := NewCore(WithLogger(logger))
+	core := mustCore(t, WithLogger(logger))
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
 	resp, err := core.Do(context.Background(), req)
 	if err != nil {
@@ -99,7 +122,7 @@ func TestCoreRetryOn503(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	core := NewCore(WithRetry(RetryPolicy{
+	core := mustCore(t, WithRetry(RetryPolicy{
 		MaxAttempts:    3,
 		InitialBackoff: time.Millisecond,
 		MaxBackoff:     time.Millisecond,
@@ -126,7 +149,7 @@ func TestCoreNoRetryOn404(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	core := NewCore(WithRetry(RetryPolicy{
+	core := mustCore(t, WithRetry(RetryPolicy{
 		MaxAttempts:    3,
 		InitialBackoff: time.Millisecond,
 		MaxBackoff:     time.Millisecond,
@@ -149,7 +172,7 @@ func TestCoreEditorError(t *testing.T) {
 	defer srv.Close()
 
 	sentinel := errors.New("boom")
-	core := NewCore(WithRequestEditor(func(*http.Request) error { return sentinel }))
+	core := mustCore(t, WithRequestEditor(func(*http.Request) error { return sentinel }))
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
 	if _, err := core.Do(context.Background(), req); !errors.Is(err, sentinel) {
 		t.Errorf("err = %v, want wrapped %v", err, sentinel)
@@ -157,12 +180,12 @@ func TestCoreEditorError(t *testing.T) {
 }
 
 func TestCoreForkSharesTransport(t *testing.T) {
-	base := NewCore(WithUserAgent("x"))
-	forked := base.Fork(WithBasicAuth("u", "p"))
+	base := mustCore(t, WithUserAgent("x"))
+	forked := mustFork(t, base, WithBasicAuth("u", "p"))
 	if base.hc != forked.hc {
 		t.Error("Fork without transport options must share the *http.Client")
 	}
-	withTLS := base.Fork(WithTLSClientConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
+	withTLS := mustFork(t, base, WithTLSClientConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
 	if base.hc == withTLS.hc {
 		t.Error("Fork with TLS config must not share the *http.Client")
 	}
@@ -176,7 +199,7 @@ func TestNewStatusError(t *testing.T) {
 	defer srv.Close()
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
-	resp, err := NewCore().Do(context.Background(), req)
+	resp, err := mustCore(t).Do(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +234,7 @@ func TestStatusErrorRedactionAndTruncation(t *testing.T) {
 	defer srv.Close()
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
-	resp, err := NewCore().Do(context.Background(), req)
+	resp, err := mustCore(t).Do(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,4 +273,167 @@ func TestSleepBackoffCapsRetryAfter(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Errorf("elapsed = %v, Retry-After was not capped at MaxBackoff", elapsed)
 	}
+}
+
+// roundTripperFunc is a Transport that is not *http.Transport.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestCoreRejectsIncompatibleTLS pins the constructor contract: TLS settings
+// cannot be applied to a client whose Transport is a wrapper RoundTripper,
+// and the combination must fail at construction instead of silently ignoring
+// the TLS config until request time.
+func TestCoreRejectsIncompatibleTLS(t *testing.T) {
+	custom := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("request must not be sent")
+		return nil, errors.New("unreachable")
+	})}
+	_, err := NewCore(WithHTTPClient(custom), WithTLSClientConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
+	if err == nil {
+		t.Fatal("expected an error for WithHTTPClient(wrapper transport) + WithTLSClientConfig")
+	}
+	if !strings.Contains(err.Error(), "WithTLSClientConfig") {
+		t.Errorf("err = %v, want it to name the offending option", err)
+	}
+
+	// *http.Transport transports and nil transports keep working.
+	if _, err := NewCore(WithHTTPClient(&http.Client{Transport: http.DefaultTransport}), WithTLSClientConfig(&tls.Config{})); err != nil {
+		t.Errorf("err = %v, want nil for an *http.Transport", err)
+	}
+	if _, err := NewCore(WithHTTPClient(&http.Client{}), WithTLSClientConfig(&tls.Config{})); err != nil {
+		t.Errorf("err = %v, want nil for a nil transport", err)
+	}
+}
+
+// TestCoreNoRetryOnPermanentTransportError verifies the retry classifier:
+// context cancellation, TLS certificate verification failures and scheme
+// mismatches are permanent and must not be retried.
+func TestCoreNoRetryOnPermanentTransportError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"context canceled", context.Canceled},
+		{"context deadline", context.DeadlineExceeded},
+		{"certificate verification", &tls.CertificateVerificationError{}},
+		{"wrapped certificate verification", fmt.Errorf("Get %q: %w", "https://h", &tls.CertificateVerificationError{})},
+		{"scheme mismatch", http.ErrSchemeMismatch},
+		{"wrapped deadline", fmt.Errorf("Get %q: %w", "https://h", context.DeadlineExceeded)},
+	}
+	for _, tc := range cases {
+		if retryableErr(tc.err) {
+			t.Errorf("%s: retryableErr(%v) = true, want false", tc.name, tc.err)
+		}
+	}
+	retryable := []error{
+		errors.New("connection refused"),
+		io.EOF,
+		&net.OpError{Op: "dial", Err: errors.New("refused")},
+	}
+	for _, err := range retryable {
+		if !retryableErr(err) {
+			t.Errorf("retryableErr(%v) = false, want true", err)
+		}
+	}
+
+	// End to end: an untrusted certificate fails after a single attempt.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("request must not reach the server")
+	}))
+	defer srv.Close()
+	core := mustCore(t, WithRetry(RetryPolicy{MaxAttempts: 3, InitialBackoff: time.Millisecond}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	_, err := core.Do(context.Background(), req)
+	var certErr *tls.CertificateVerificationError
+	if !errors.As(err, &certErr) {
+		t.Fatalf("err = %v, want a *tls.CertificateVerificationError", err)
+	}
+}
+
+// TestCoreBodyReplay verifies the body contract of Core.Do: in-memory bodies
+// (GetBody set) are replayed across retry attempts, a body that cannot be
+// replayed is rejected up front when retry is enabled, and a single attempt
+// (retry disabled) accepts it.
+func TestCoreBodyReplay(t *testing.T) {
+	var attempts int32
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if atomic.AddInt32(&attempts, 1) < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+
+	// Retryable status + GetBody-backed body: replayed on the second attempt.
+	core := mustCore(t, WithRetry(RetryPolicy{MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, bytes.NewBufferString("payload"))
+	resp, err := core.Do(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if attempts != 2 || len(bodies) != 2 {
+		t.Fatalf("attempts = %d, bodies = %d, want 2 each", attempts, len(bodies))
+	}
+	if bodies[0] != "payload" || bodies[1] != "payload" {
+		t.Errorf("bodies = %q, want both attempts to carry the full payload", bodies)
+	}
+
+	// Body without GetBody + retry enabled: rejected before anything is sent.
+	sent := false
+	srv2 := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { sent = true }))
+	defer srv2.Close()
+	core2 := mustCore(t, WithRetry(RetryPolicy{MaxAttempts: 3, InitialBackoff: time.Millisecond}))
+	req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv2.URL, nil)
+	req2.Body = io.NopCloser(strings.NewReader("unreplayable"))
+	req2.GetBody = nil
+	if _, err := core2.Do(ctx, req2); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Errorf("err = %v, want a body replay error", err)
+	}
+	if sent {
+		t.Error("request with unreplayable body must not be sent")
+	}
+
+	// Retry disabled: the same request passes through untouched.
+	core3 := mustCore(t)
+	req3, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv2.URL, nil)
+	req3.Body = io.NopCloser(strings.NewReader("unreplayable"))
+	req3.GetBody = nil
+	resp3, err := core3.Do(ctx, req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp3.Body.Close()
+	if !sent {
+		t.Error("single-attempt request must be sent")
+	}
+}
+
+// TestStatusErrorURLRedaction pins the error-hygiene contract for the URL:
+// userinfo passwords are masked (as on the log path) while the query string
+// stays intact for diagnostics.
+func TestStatusErrorURLRedaction(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "https://user:secret@gw.example.com/wado?requestType=WADO&studyUID=1.2.3", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Status:     "403 Forbidden",
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader("denied")),
+	}
+	se := NewStatusError(req, resp)
+	if strings.Contains(se.URL, "secret") {
+		t.Errorf("StatusError.URL = %q, want the password redacted", se.URL)
+	}
+	if !strings.Contains(se.URL, "requestType=WADO") || !strings.Contains(se.URL, "studyUID=1.2.3") {
+		t.Errorf("StatusError.URL = %q, want the query preserved for diagnostics", se.URL)
+	}
+	if !strings.Contains(se.URL, "xxxxx") {
+		t.Errorf("StatusError.URL = %q, want the stdlib redaction marker", se.URL)
+	}
+	_ = se.Error() // must not panic on the redacted URL
 }

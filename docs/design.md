@@ -61,8 +61,8 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 
 - **单一 GET，标准不定义任何路径**——Target URI 就是服务的 Base URI（现网常见 `/wado`、`/wado-uri` 等，完全由部署方决定）。资源全部通过查询参数标识：
   - 必选：`requestType=WADO`、`studyUID`、`seriesUID`、`objectUID`。
-  - 可选（Retrieve DICOM Instance 事务，§9.4）：`contentType`（默认/缺省 `application/dicom`）、`charset`、`anonymize=yes`（经典名 `anonymity`）、`annotation=patient,technique`、`transferSyntax=<UID>`（转码，服务器可选支持）。
-  - 可选（Retrieve Rendered Instance 事务，§9.5）：`contentType`（必须是渲染类型，填 `application/dicom` 会 406）、`frameNumber`、`imageQuality`、`rows`/`columns`（成对）、`region=xmin,ymin,xmax,ymax`（归一化坐标）、`windowCenter`/`windowWidth`（成对，与 Presentation State 互斥）、`presentationUID`/`presentationSeriesUID`（成对）。
+  - 可选（Retrieve DICOM Instance 事务，§9.4）：`contentType`（默认/缺省 `application/dicom`）、`charset`、`anonymize=yes`（经典名 `anonymity`；§8.1 规定仅可与 `application/dicom` 同用）、`transferSyntax=<UID>`（转码，服务器可选支持）。
+  - 可选（Retrieve Rendered Instance 事务，§9.5）：`contentType`（必须是渲染类型，填 `application/dicom` 会 406）、`annotation=patient,technique`（§8.2：`application/dicom` 时不得出现）、`frameNumber`、`imageQuality`、`rows`/`columns`（成对）、`region=xmin,ymin,xmax,ymax`（归一化坐标）、`windowCenter`/`windowWidth`（成对，与 Presentation State 互斥）、`presentationUID`/`presentationSeriesUID`（成对）。
 - **响应恒为单段**（非 multipart）：一个 DICOM PS3.10 文件或一张渲染图。
 - 缺省 `contentType` 且 `Accept: */*` 时默认 `image/jpeg`。
 - 状态码：400（如 `requestType` 缺失或非 `WADO`）及 §8.5 公共码。
@@ -144,6 +144,8 @@ wado.WithBearerTokenSource(ts)                       // ts: Token() (string, err
 wado.WithRequestEditor(func(*http.Request) error)     // 任意签名/私有头
 wado.WithHTTPClient(*http.Client)                     // 整体接管（含代理、TLS 配置）
 wado.WithTLSClientConfig(*tls.Config)                 // 医院自签 CA 常见，单独给快捷方式
+                                                      // 与 WithHTTPClient 组合时仅支持 nil 或 *http.Transport，
+                                                      // 包装型 RoundTripper 无法注入 → 构造期直接报错
 wado.WithTransportWrapper(func(rt http.RoundTripper) http.RoundTripper) // 接 otel/metrics，不硬依赖
 wado.WithLogger(Logger)                               // 极简接口；nil = 静默
 ```
@@ -275,8 +277,8 @@ type URIRequest struct {
     ContentType      string   // "" = application/dicom（DICOM 实例）；填 image/* 走渲染事务
     TransferSyntax   string   // 仅 DICOM 实例
     Charset          string
-    Anonymize        bool
-    Annotation       []string // "patient","technique"
+    Anonymize        bool     // 仅 DICOM 实例（§8.1）
+    Annotation       []string // "patient","technique"；仅渲染（§8.2）
     FrameNumber      int      // 渲染
     ImageQuality     int      // 渲染 1-100
     Rows, Columns    int      // 成对
@@ -320,7 +322,7 @@ type Resolver[K comparable] interface {
 }
 type ResolverFunc[K comparable] func(ctx context.Context, key K) (Endpoint, error) // 函数适配
 
-func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) *Registry[K]
+func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) (*Registry[K], error)
 func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error)
     // Resolve → 校验 → 底座.Fork(...) → 缓存；键只在此处出现一次
 func (r *Registry[K]) Invalidate(key K) // 前缀变更/凭证轮换时失效重建

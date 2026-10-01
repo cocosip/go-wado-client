@@ -2,6 +2,7 @@ package wadouri
 
 import (
 	"fmt"
+	"mime"
 	"net/url"
 	"strconv"
 	"strings"
@@ -37,10 +38,13 @@ type Request struct {
 
 	TransferSyntax string
 	Charset        string
-	Anonymize      bool     // emitted as anonymity=yes (anonymize=yes with modern names)
-	Annotation     []string // "patient" / "technique"
+	// Anonymize is emitted as anonymity=yes (anonymize=yes with modern
+	// names). It is a DICOM-only parameter: PS3.18 §8.1 forbids it together
+	// with a rendered contentType.
+	Anonymize  bool
+	Annotation []string // "patient" / "technique"; rendered-only (PS3.18 §8.2)
 
-	// Rendered parameters below. Per PS3.18 §9.5 they apply to rendered
+	// Rendered parameters below. Per PS3.18 §8.2 they apply to image
 	// retrieval only, so they are rejected together with the
 	// application/dicom content type (the server would answer 400).
 	FrameNumber  int // 1-based; 0 = absent
@@ -70,12 +74,29 @@ func (r Request) validate(checkUID func(field, uid string) error) error {
 	if err := r.validateUIDs(checkUID); err != nil {
 		return err
 	}
-	isDICOM := r.ContentType == "" ||
-		strings.EqualFold(strings.TrimSpace(r.ContentType), "application/dicom")
+	isDICOM, err := r.dicomContentType()
+	if err != nil {
+		return err
+	}
 	if err := r.validateWindowAndPresentation(isDICOM); err != nil {
 		return err
 	}
 	return r.validateRenderedValues(isDICOM)
+}
+
+// dicomContentType classifies the contentType: the media type (parameters
+// stripped) decides between the DICOM instance transaction (the default) and
+// the rendered transaction. An unparseable value is rejected up front — the
+// server would answer 400.
+func (r Request) dicomContentType() (bool, error) {
+	if r.ContentType == "" {
+		return true, nil
+	}
+	mt, _, err := mime.ParseMediaType(strings.TrimSpace(r.ContentType))
+	if err != nil {
+		return false, &wado.RequestError{Field: "ContentType", Reason: fmt.Sprintf("not a valid media type: %v", err)}
+	}
+	return mt == "application/dicom", nil
 }
 
 // validateUIDs checks the mandatory identification triple and the optional
@@ -137,9 +158,14 @@ func (r Request) validateWindowAndPresentation(isDICOM bool) error {
 
 // validateRenderedValues checks the rendered-only parameters: the paired
 // rows/columns constraint, their exclusion from the DICOM instance
-// transaction (PS3.18 §9.5: they apply to rendered retrieval only), the
-// region bounds, and the remaining value ranges.
+// transaction (PS3.18 §8.2: they apply to image retrieval only — a request
+// carrying them for a non-image object is answered 400), the anonymize
+// direction (PS3.18 §8.1: DICOM responses only), the region bounds, and the
+// remaining value ranges.
 func (r Request) validateRenderedValues(isDICOM bool) error {
+	if r.Anonymize && !isDICOM {
+		return &wado.RequestError{Field: "Anonymize", Reason: "requires the application/dicom contentType"}
+	}
 	if (r.Rows > 0) != (r.Columns > 0) {
 		return &wado.RequestError{Field: "Rows/Columns", Reason: reasonSetTogether}
 	}
@@ -153,6 +179,10 @@ func (r Request) validateRenderedValues(isDICOM bool) error {
 			return &wado.RequestError{Field: "Rows/Columns", Reason: reasonNeedsRendered}
 		case r.Region != nil:
 			return &wado.RequestError{Field: "Region", Reason: reasonNeedsRendered}
+		case len(r.Annotation) > 0:
+			// PS3.18 §8.2: "It shall not be present if contentType is
+			// application/dicom".
+			return &wado.RequestError{Field: "Annotation", Reason: reasonNeedsRendered}
 		}
 	}
 	if r.Region != nil {

@@ -6,6 +6,7 @@ package wado
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -33,8 +34,10 @@ type Core struct {
 	modernParams bool
 }
 
-// NewCore builds a shared core from the given options.
-func NewCore(opts ...Option) *Core {
+// NewCore builds a shared core from the given options. It fails when the
+// options are contradictory — see WithTLSClientConfig for the one case that
+// can trigger this.
+func NewCore(opts ...Option) (*Core, error) {
 	s := &settings{}
 	applySettings(s, opts...)
 	return coreFromSettings(s)
@@ -48,9 +51,13 @@ func applySettings(s *settings, opts ...Option) {
 	}
 }
 
-func coreFromSettings(s *settings) *Core {
+func coreFromSettings(s *settings) (*Core, error) {
+	hc, err := s.httpClientOrDefault()
+	if err != nil {
+		return nil, err
+	}
 	c := &Core{
-		hc:           s.httpClientOrDefault(),
+		hc:           hc,
 		editors:      s.editors,
 		logger:       DiscardLogger,
 		ua:           s.userAgent,
@@ -66,12 +73,12 @@ func coreFromSettings(s *settings) *Core {
 	if s.logger != nil {
 		c.logger = s.logger
 	}
-	return c
+	return c, nil
 }
 
 // Fork clones the core and applies extra options on top; anything that does
 // not touch the transport keeps sharing the underlying connection pool.
-func (c *Core) Fork(opts ...Option) *Core {
+func (c *Core) Fork(opts ...Option) (*Core, error) {
 	s := &settings{
 		httpClient:   c.hc,
 		editors:      append([]func(*http.Request) error(nil), c.editors...),
@@ -88,33 +95,37 @@ func (c *Core) Fork(opts ...Option) *Core {
 	return coreFromSettings(s)
 }
 
-func (s *settings) httpClientOrDefault() *http.Client {
+func (s *settings) httpClientOrDefault() (*http.Client, error) {
 	if s.httpClient != nil {
 		switch {
 		case s.tlsCfg == nil:
-			return s.httpClient
+			return s.httpClient, nil
 		case s.httpClient.Transport == nil:
 			t := defaultTransport()
 			t.TLSClientConfig = s.tlsCfg
 			c2 := *s.httpClient
 			c2.Transport = t
-			return &c2
+			return &c2, nil
 		default:
 			if t, ok := s.httpClient.Transport.(*http.Transport); ok {
 				tt := t.Clone()
 				tt.TLSClientConfig = s.tlsCfg
 				c2 := *s.httpClient
 				c2.Transport = tt
-				return &c2
+				return &c2, nil
 			}
-			return s.httpClient
+			// A wrapper RoundTripper hides the *http.Transport that carries
+			// TLS settings — applying the config is impossible, and silently
+			// ignoring it would surface as opaque TLS failures at request
+			// time (hospital self-signed CAs are a core scenario).
+			return nil, errors.New("wado: WithTLSClientConfig cannot be combined with an HTTP client whose Transport is not *http.Transport")
 		}
 	}
 	t := defaultTransport()
 	if s.tlsCfg != nil {
 		t.TLSClientConfig = s.tlsCfg
 	}
-	return &http.Client{Transport: t}
+	return &http.Client{Transport: t}, nil
 }
 
 // defaultTransport follows design decision D4: fine-grained timeouts and no
@@ -133,13 +144,25 @@ func defaultTransport() *http.Transport {
 // applied before every attempt, and network errors plus 429/502/503/504 are
 // retried with backoff according to the configured policy.
 //
-// Requests carrying a body must make it replayable: every attempt shares the
-// original req.Body reader as-is. All requests issued by this library are
+// Requests carrying a body are replayed via GetBody (populated automatically
+// by http.NewRequest for in-memory readers); a body that cannot be replayed
+// while retry is enabled is rejected up front instead of being silently
+// truncated on the second attempt. All requests issued by this library are
 // bodyless GETs.
 func (c *Core) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	p := c.retry.normalized()
+	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil && p.MaxAttempts > 1 {
+		return nil, errors.New("wado: request carries a body that cannot be replayed (no GetBody) while retry is enabled")
+	}
 	for attempt := 1; ; attempt++ {
 		r := req.Clone(ctx)
+		if r.Body != nil && r.Body != http.NoBody && r.GetBody != nil {
+			b, err := r.GetBody()
+			if err != nil {
+				return nil, fmt.Errorf("wado: replay request body: %w", err)
+			}
+			r.Body = b
+		}
 		for _, e := range c.editors {
 			if err := e(r); err != nil {
 				return nil, fmt.Errorf("wado: request editor: %w", err)
@@ -181,11 +204,19 @@ func (c *Core) Do(ctx context.Context, req *http.Request) (*http.Response, error
 	}
 }
 
+// retryableErr classifies transport errors. Context cancellation never
+// retries, and neither do permanent failures that no number of attempts can
+// fix: TLS certificate verification (hospital self-signed CA not trusted)
+// and an HTTP server answering a TLS request (scheme mismatch).
 func retryableErr(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	return true
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return false
+	}
+	return !errors.Is(err, http.ErrSchemeMismatch)
 }
 
 func retryableStatus(code int) bool {
