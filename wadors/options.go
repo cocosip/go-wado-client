@@ -21,7 +21,8 @@ func WithTransferSyntax(uid string) RetrieveOption {
 	return func(c *retrieveCfg) { c.transferSyntax = uid }
 }
 
-// WithCharset sets the Accept-Charset header.
+// WithCharset sets the PS3.18 charset query parameter (the standard
+// character-set negotiation for WADO-RS and WADO-URI alike).
 func WithCharset(cs string) RetrieveOption {
 	return func(c *retrieveCfg) { c.charset = cs }
 }

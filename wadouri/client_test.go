@@ -18,6 +18,8 @@ const (
 	testSeriesUID       = "1.2.4"
 	testObjectUID       = "1.2.5"
 	testPresentationUID = "1.2.9"
+	// testPresentationSeriesUID pairs with testPresentationUID.
+	testPresentationSeriesUID = "1.2.10"
 	// testContentTypeDICOM selects the DICOM instance transaction.
 	testContentTypeDICOM = "application/dicom"
 )
@@ -67,7 +69,7 @@ func TestRetrieveIntegration(t *testing.T) {
 	}
 }
 
-func TestRetrieveModernAnonymize(t *testing.T) {
+func TestRetrieveAnonymizeNaming(t *testing.T) {
 	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
@@ -75,19 +77,36 @@ func TestRetrieveModernAnonymize(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c, _ := New(srv.URL+"/wado", wado.WithModernParamNames())
+	// Default: the current standard name (PS3.18 §8.1.7, in force since 2019).
+	c, _ := New(srv.URL + "/wado")
 	resp, err := c.Retrieve(context.Background(), Request{
 		StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Anonymize: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Close() }()
+	_ = resp.Close()
 	if gotQuery.Get("anonymize") != anonymizeEnabled {
-		t.Errorf("anonymize = %q", gotQuery.Get("anonymize"))
+		t.Errorf("anonymize = %q, want the standard name by default", gotQuery.Get("anonymize"))
 	}
 	if _, ok := gotQuery["anonymity"]; ok {
-		t.Error("anonymity must not appear in modern mode")
+		t.Error("anonymity must not appear in the default mode")
+	}
+
+	// Legacy: the pre-2019 name for old gateways.
+	legacy, _ := New(srv.URL+"/wado", wado.WithLegacyParamNames())
+	resp, err = legacy.Retrieve(context.Background(), Request{
+		StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Anonymize: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Close()
+	if gotQuery.Get("anonymity") != anonymizeEnabled {
+		t.Errorf("anonymity = %q, want the legacy name in legacy mode", gotQuery.Get("anonymity"))
+	}
+	if _, ok := gotQuery["anonymize"]; ok {
+		t.Error("anonymize must not appear in legacy mode")
 	}
 }
 

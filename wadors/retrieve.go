@@ -35,6 +35,18 @@ func (c *Client) RetrieveInstance(ctx context.Context, studyUID, seriesUID, sopU
 		"application/dicom", opts)
 }
 
+// applyCharset applies the PS3.18 WADO-RS charset request parameter (the
+// query form defined by §6.5 of the 2019a text); WADO-URI uses the same
+// parameter name in its query string.
+func applyCharset(u *url.URL, charset string) {
+	if charset == "" {
+		return
+	}
+	q := u.Query()
+	q.Set("charset", charset)
+	u.RawQuery = q.Encode()
+}
+
 func (c *Client) retrieveMultipart(ctx context.Context, u *url.URL, partType string, opts []RetrieveOption) (*Multipart, error) {
 	cfg := buildRetrieveCfg(opts)
 	// "*" is the PS3.18 wildcard ("any transfer syntax"), not a UID.
@@ -43,11 +55,9 @@ func (c *Client) retrieveMultipart(ctx context.Context, u *url.URL, partType str
 			return nil, err
 		}
 	}
+	applyCharset(u, cfg.charset)
 	resp, err := c.do(ctx, u, func(req *http.Request) {
 		req.Header.Set("Accept", cfg.acceptHeader(partType))
-		if cfg.charset != "" {
-			req.Header.Set("Accept-Charset", cfg.charset)
-		}
 	})
 	if err != nil {
 		return nil, err

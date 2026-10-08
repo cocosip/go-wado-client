@@ -66,11 +66,8 @@ func (e *StatusError) IsRetryable() bool {
 // error values end up in logs and bug reports, where session cookies are
 // noise at best and a credential leak at worst.
 func NewStatusError(req *http.Request, resp *http.Response) *StatusError {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
-	if len(body) > 4096 {
-		body = body[:4096]
-	}
 	header := resp.Header.Clone()
 	header.Del("Set-Cookie")
 	return &StatusError{

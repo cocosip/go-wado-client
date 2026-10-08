@@ -145,10 +145,10 @@ func run(ctx context.Context, endpoint, studyUID, seriesUID, objectUID, outDir s
 	}
 	fmt.Println("rendered saved:", name)
 
-	// WithModernParamNames() switches the 2023+ parameter naming
-	// (anonymize instead of anonymity etc.) — construct the client with it
-	// when the gateway speaks the newer standard:
-	//   u, err := wadouri.New(endpoint, append(clientOptions(insecure), wado.WithModernParamNames())...)
+	// WithLegacyParamNames() switches the anonymization parameter to the
+	// pre-2019 name (anonymity instead of anonymize) — construct the client
+	// with it when the gateway does not speak the current standard naming:
+	//   u, err := wadouri.New(endpoint, append(clientOptions(insecure), wado.WithLegacyParamNames())...)
 	return nil
 }
 
@@ -173,7 +173,7 @@ func clientOptions(insecure bool) []wado.Option {
 	//   wado.WithRequestEditor(func(r *http.Request) error { ... })
 	//   wado.WithHTTPClient(customClient)
 	//   wado.WithLenientUID()
-	//   wado.WithModernParamNames()
+	//   wado.WithLegacyParamNames()
 	//   wado.WithLogHandler(handler)
 	return opts
 }

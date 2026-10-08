@@ -33,7 +33,7 @@ func TestRequestValidate(t *testing.T) {
 		{"window width only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, WindowWidth: &ww}},
 		{"presentation uid only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, PresentationUID: testPresentationUID}},
 		{"presentation pair with window pair", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
-			WindowCenter: &wc, WindowWidth: &ww, PresentationUID: testPresentationUID, PresentationSeriesUID: "1.2.10"}},
+			WindowCenter: &wc, WindowWidth: &ww, PresentationUID: testPresentationUID, PresentationSeriesUID: testPresentationSeriesUID}},
 		{"window with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeDICOM, WindowCenter: &wc, WindowWidth: &ww}},
 		{"window with case-varied dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
@@ -44,8 +44,14 @@ func TestRequestValidate(t *testing.T) {
 			ContentType: testContentTypeDICOM, ImageQuality: 90}},
 		{"rows/columns with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeDICOM, Rows: 512, Columns: 512}},
+		{"rows only with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeDICOM, Rows: 512}},
 		{"region with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeDICOM, Region: &[4]float64{0.1, 0.1, 0.9, 0.9}}},
+		// PS3.18 §8.2.4: region is forbidden together with a Presentation Object.
+		{"region with presentation state", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeJPEG, Region: &[4]float64{0.1, 0.1, 0.9, 0.9},
+			PresentationUID: testPresentationUID, PresentationSeriesUID: testPresentationSeriesUID}},
 		// PS3.18 §8.2: annotation is burned into image pixels — rendered-only.
 		{"annotation with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeDICOM, Annotation: []string{AnnotationPatient}}},
@@ -57,7 +63,6 @@ func TestRequestValidate(t *testing.T) {
 		// Parameters do not change the classification: still application/dicom.
 		{"window with parameterized dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: "application/dicom; charset=utf-8", WindowCenter: &wc, WindowWidth: &ww}},
-		{"rows only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Rows: 512}},
 		{"region out of range", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			Region: &[4]float64{0.5, 0.1, 0.4, 0.9}}},
 		{"quality too large", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, ImageQuality: 101}},
@@ -77,8 +82,14 @@ func TestRequestValidate(t *testing.T) {
 			WindowCenter: &wc, WindowWidth: &ww, Rows: 512, Columns: 512,
 			Region: &[4]float64{0.1, 0.1, 0.9, 0.9}, ImageQuality: 90, FrameNumber: 3,
 			Annotation: []string{AnnotationPatient}},
+		// PS3.18 §8.2.2: rows/columns are independently optional — one alone
+		// lets the server preserve the aspect ratio.
 		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
-			PresentationUID: testPresentationUID, PresentationSeriesUID: "1.2.10"},
+			ContentType: testContentTypeJPEG, Rows: 512},
+		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeJPEG, Columns: 512},
+		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			PresentationUID: testPresentationUID, PresentationSeriesUID: testPresentationSeriesUID},
 		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			TransferSyntax: "1.2.840.10008.1.2.1"},
 		// The PS3.18 wildcard ("any transfer syntax") is not a UID and passes.
@@ -132,7 +143,7 @@ func TestRequestQueryEncoding(t *testing.T) {
 		"contentType":    testContentTypeJPEG,
 		"transferSyntax": "1.2.840.10008.1.2.4.50",
 		"charset":        "ISO_IR 100",
-		"anonymity":      anonymizeEnabled,
+		"anonymize":      anonymizeEnabled,
 		"annotation":     "patient,technique",
 		"frameNumber":    "7",
 		"imageQuality":   "90",
@@ -149,13 +160,14 @@ func TestRequestQueryEncoding(t *testing.T) {
 		}
 	}
 
-	// Modern naming switches the anonymize key.
-	mq := req.query(true)
-	if got := mq.Get("anonymize"); got != anonymizeEnabled {
-		t.Errorf("anonymize = %q", got)
+	// The default naming is the current standard: anonymize (PS3.18 §8.1.7).
+	// Legacy naming switches the anonymization key to the pre-2019 name.
+	lq := req.query(true)
+	if got := lq.Get("anonymity"); got != anonymizeEnabled {
+		t.Errorf("anonymity = %q", got)
 	}
-	if _, ok := mq["anonymity"]; ok {
-		t.Error("anonymity must not appear in modern mode")
+	if _, ok := lq["anonymize"]; ok {
+		t.Error("anonymize must not appear in legacy mode")
 	}
 
 	// Empty content type omits the parameter (application/dicom default).

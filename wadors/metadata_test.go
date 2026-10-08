@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -264,5 +265,85 @@ func TestResolveBulkDataURIsJSONNumberPrecision(t *testing.T) {
 	want := "https://h/dicomweb/studies/1.2/bulkdata/7FE00010"
 	if !bytes.Contains(out, []byte(`"BulkDataURI":"`+want+`"`)) {
 		t.Errorf("BulkDataURI not resolved in %s", out)
+	}
+}
+
+// TestStudyMetadataStream verifies the streaming cursor: parts are parsed as
+// the caller advances, array parts contribute multiple items, io.EOF
+// terminates the iteration, and Close releases the response.
+func TestStudyMetadataStream(t *testing.T) {
+	const item1 = `{"00080018":{"vr":"UI","Value":["1.2.840.777"]}}`
+	const item2 = `{"00080018":{"vr":"UI","Value":["1.2.840.888"]}}`
+	const item3 = `{"00080018":{"vr":"UI","Value":["1.2.840.999"]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="application/dicom+json"`)
+		_, _ = w.Write(multipartBody([]fakePart{
+			{ct: mediaTypeDICOMJSON, body: "[" + item1 + "," + item2 + "]"},
+			{ct: mediaTypeDICOMJSON, body: item3},
+		}))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/dicomweb")
+	ms, err := c.StudyMetadataStream(context.Background(), "1.2.840.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sops []string
+	for {
+		ds, err := ms.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		sop, ok := ds.GetString(tag.SOPInstanceUID)
+		if !ok {
+			t.Fatal("SOPInstanceUID missing")
+		}
+		sops = append(sops, sop)
+	}
+	if err := ms.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{testSOPUID, "1.2.840.888", "1.2.840.999"}
+	if len(sops) != len(want) {
+		t.Fatalf("streamed datasets = %v, want %v", sops, want)
+	}
+	for i := range want {
+		if sops[i] != want[i] {
+			t.Errorf("sops[%d] = %q, want %q", i, sops[i], want[i])
+		}
+	}
+
+	// Next after EOF keeps returning io.EOF.
+	if _, err := ms.Next(); err != io.EOF {
+		t.Errorf("Next after EOF = %v, want io.EOF", err)
+	}
+}
+
+// TestMetadataCharsetAsQueryParam pins the PS3.18 negotiation mechanism for
+// metadata requests: the charset travels in the query string, not in an
+// Accept-Charset header.
+func TestMetadataCharsetAsQueryParam(t *testing.T) {
+	var gotQuery url.Values
+	var gotAcceptCharset string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery, gotAcceptCharset = r.URL.Query(), r.Header.Get("Accept-Charset")
+		w.Header().Set("Content-Type", mediaTypeDICOMJSON)
+		_, _ = w.Write([]byte(studyMetaJSON))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/dicomweb")
+	if _, err := c.StudyMetadata(context.Background(), "1.2.840.1", WithCharset("ISO_IR 100")); err != nil {
+		t.Fatal(err)
+	}
+	if got := gotQuery.Get("charset"); got != "ISO_IR 100" {
+		t.Errorf("charset query = %q, want ISO_IR 100", got)
+	}
+	if gotAcceptCharset != "" {
+		t.Errorf("Accept-Charset header = %q, want absent", gotAcceptCharset)
 	}
 }

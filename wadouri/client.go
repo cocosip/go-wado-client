@@ -109,7 +109,7 @@ func (c *Client) Retrieve(ctx context.Context, req Request) (*Response, error) {
 		return nil, err
 	}
 	u := *c.ep
-	u.RawQuery = req.query(c.core.ModernParams()).Encode()
+	u.RawQuery = req.query(c.core.LegacyParams()).Encode()
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err

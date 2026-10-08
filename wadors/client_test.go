@@ -1,10 +1,14 @@
 package wadors
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/cocosip/go-wado-client"
@@ -181,5 +185,71 @@ func TestFork(t *testing.T) {
 	}
 	if _, err := c.Fork("not-a-url"); err == nil {
 		t.Error("Fork with invalid URL expected error")
+	}
+}
+
+// TestCharsetQueryParam pins the standard negotiation mechanism: the charset
+// RetrieveOption travels as the PS3.18 charset query parameter (§6.5 of the
+// 2019a text), not as an Accept-Charset header.
+func TestCharsetQueryParam(t *testing.T) {
+	var gotQuery url.Values
+	var gotAcceptCharset string
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery, gotAcceptCharset, gotPath = r.URL.Query(), r.Header.Get("Accept-Charset"), r.URL.Path
+		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="application/dicom"`)
+		_, _ = w.Write(multipartBody(dicomParts(r.Host)))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL + "/dicomweb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mp, err := c.RetrieveStudy(context.Background(), "1.2.840.1", WithCharset("ISO_IR 100"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/dicomweb/studies/1.2.840.1" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if got := gotQuery.Get("charset"); got != "ISO_IR 100" {
+		t.Errorf("charset query = %q, want ISO_IR 100", got)
+	}
+	if gotAcceptCharset != "" {
+		t.Errorf("Accept-Charset header = %q, want absent (the query parameter is the standard mechanism)", gotAcceptCharset)
+	}
+}
+
+// TestRetrieveFramesLongListWarning verifies the advisory log for frame
+// lists long enough to risk a 414 from the gateway.
+func TestRetrieveFramesLongListWarning(t *testing.T) {
+	var buf bytes.Buffer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="application/octet-stream"`)
+		_, _ = w.Write(multipartBody([]fakePart{{ct: "application/octet-stream", body: "F"}}))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL+"/dicomweb", wado.WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := make([]int, 0, 1500)
+	for i := 1; i <= 1500; i++ {
+		frames = append(frames, i)
+	}
+	mp, err := c.RetrieveFrames(context.Background(), "1.2.3", "1.2.4", "1.2.5", frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "414 URL Too Long") {
+		t.Errorf("log = %q, want a long-frame-list warning", buf.String())
 	}
 }

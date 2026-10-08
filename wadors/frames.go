@@ -10,6 +10,11 @@ import (
 	"github.com/cocosip/go-wado-client"
 )
 
+// frameListWarnLimit is the rendered FrameList length (in characters) above
+// which a warning is logged: the list travels in the URL, and gateways start
+// answering 414 URL Too Long in this magnitude. Batch the calls beyond it.
+const frameListWarnLimit = 2048
+
 // RetrieveFrames retrieves the given frames (multipart/related,
 // type=application/octet-stream). Frames are 1-based; the list is sorted and
 // de-duplicated automatically to satisfy the standard's ascending-order
@@ -18,6 +23,10 @@ func (c *Client) RetrieveFrames(ctx context.Context, studyUID, seriesUID, sopUID
 	fl, err := framesList(frames)
 	if err != nil {
 		return nil, err
+	}
+	if len(fl) > frameListWarnLimit {
+		c.core.Logger().Warn("wadors: very long frame list; gateways may answer 414 URL Too Long, consider batching",
+			"length", len(fl), "limit", frameListWarnLimit)
 	}
 	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID, "sopInstanceUID", sopUID); err != nil {
 		return nil, err

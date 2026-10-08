@@ -50,9 +50,9 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 要点：
 
 - **`{study}`/`{series}`/`{instance}` 是 UID 原样出现在路径段中**；`{frames}` 为逗号分隔、升序帧号（1 起，现行文本不含区间语法）。
-- **媒体类型协商走 `Accept` 头**（双端必选支持）：实例检索 `multipart/related; type="application/dicom"`，可附加 `transfer-syntax=<UID>` 参数协商转码（`*` 为标准定义的通配符，表示"服务器任选支持的传输语法"；该参数仅适用于实例/帧检索，metadata 恒为 dicom+json 不携带）；元数据 `application/dicom+json`；帧/批量数据 `multipart/related; type="application/octet-stream"`。新版另定义了 `accept`/`charset` 查询参数，老服务器只认头，库统一走 `Accept` 头（兼容面最大）。
+- **媒体类型协商走 `Accept` 头**（双端必选支持）：实例检索 `multipart/related; type="application/dicom"`，可附加 `transfer-syntax=<UID>` 参数协商转码（`*` 为标准定义的通配符，表示"服务器任选支持的传输语法"；该参数仅适用于实例/帧检索，metadata 恒为 dicom+json 不携带）；元数据 `application/dicom+json`；帧/批量数据 `multipart/related; type="application/octet-stream"`。字符集协商用标准的 `charset` **查询参数**（PS3.18 §6.5 定义，2019a 起明确；`Accept-Charset` 头不是 WADO-RS 的标准机制，不发）。
 - **渲染媒体类型**（§8.7.4）：单帧 image/jpeg（基准必须支持）/png/gif/jp2/jxl，多帧 gif/jxl，视频 video/mpeg、video/mp4、video/H265，文本 text/html、text/plain、application/pdf 等；渲染类型**不允许**带 transfer-syntax 参数。
-- **渲染查询参数**：新版为 `annotation`、`quality`、`viewport`（vw,vh 即 columns,rows）、`window=center,width,function`（**三值必填**，function 取 linear/linear-exact/sigmoid，缺省 linear）、`iccprofile`；经典部署为 `annotations`、`quality`、`viewport`、`windowcenter`、`windowwidth`、`icccolorspace`（命名差异见 §3 D6）。
+- **渲染查询参数**：标准命名为 `annotation`、`quality`、`viewport`（vw,vh 即 columns,rows）、`window=center,width,function`（**三值必填**，function 取 linear/linear-exact/sigmoid，缺省 linear）、`iccprofile`——rendered 事务自 2016d 入标起即用此命名；`annotations`/`windowcenter`/`windowwidth`/`icccolorspace` 是退役的 WADO-WS 时代方言（从未见于任何 WADO-RS 版本），仅在对接只认它的私有网关时经 `WithLegacyParamNames` 显式启用（见 §3 D6）。
 - **BulkDataURI 三种形式**（相对路径解析规则，见 §3 D9）：绝对 URI；带绝对路径的相对 URI（`/dicomweb/studies/...`）；带相对路径的相对 URI（`./bulkdata/...`，相对于**发起元数据请求的路径**）。
 - **状态码**：200；400（请求/参数错误，如 UID 含非法字符）；404（资源不存在）；406（媒体类型不可协商）；410（已删除）；413（过大）；另有 §8.5 公共码（304/501/503 等）。
 - multipart 每 part 通常带 `Content-Location`（指向该实例的资源 URI，可用于命名落盘文件）。
@@ -62,7 +62,7 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 - **单一 GET，标准不定义任何路径**——Target URI 就是服务的 Base URI（现网常见 `/wado`、`/wado-uri` 等，完全由部署方决定）。资源全部通过查询参数标识：
   - 必选：`requestType=WADO`、`studyUID`、`seriesUID`、`objectUID`。
   - 可选（Retrieve DICOM Instance 事务，§9.4）：`contentType`（默认/缺省 `application/dicom`）、`charset`、`anonymize=yes`（经典名 `anonymity`；§8.1 规定仅可与 `application/dicom` 同用）、`transferSyntax=<UID>`（转码，服务器可选支持）。
-  - 可选（Retrieve Rendered Instance 事务，§9.5）：`contentType`（必须是渲染类型，填 `application/dicom` 会 406）、`annotation=patient,technique`（§8.2：`application/dicom` 时不得出现）、`frameNumber`、`imageQuality`、`rows`/`columns`（成对）、`region=xmin,ymin,xmax,ymax`（归一化坐标）、`windowCenter`/`windowWidth`（成对，与 Presentation State 互斥）、`presentationUID`/`presentationSeriesUID`（成对）。
+  - 可选（Retrieve Rendered Instance 事务，§9.5）：`contentType`（必须是渲染类型，填 `application/dicom` 会 406）、`annotation=patient,technique`（§8.2：`application/dicom` 时不得出现）、`frameNumber`、`imageQuality`、`rows`/`columns`（**各自独立可选**，§8.2.2：只给一个时服务器按保持纵横比推算另一个）、`region=xmin,ymin,xmax,ymax`（归一化坐标；§8.2.4：与 Presentation State 互斥）、`windowCenter`/`windowWidth`（成对，与 Presentation State 互斥）、`presentationUID`/`presentationSeriesUID`（成对）。
 - **响应恒为单段**（非 multipart）：一个 DICOM PS3.10 文件或一张渲染图。
 - 缺省 `contentType` 且 `Accept: */*` 时默认 `image/jpeg`。
 - 状态码：400（如 `requestType` 缺失或非 `WADO`）及 §8.5 公共码。
@@ -70,14 +70,14 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 
 ### 2.3 新旧版本差异汇总（兼容策略的依据）
 
-| 项 | 经典部署（≤2022 版及绝大多数现网 PACS） | 现行 2026d |
+| 项 | 退役 WADO-WS 时代方言 / 老私有网关 | 现行标准（rendered 自 2016d、anonymize 自 2019a） |
 |---|---|---|
-| WADO-RS 渲染参数名 | `annotations` `windowcenter` `windowwidth` `icccolorspace` | `annotation` `window` `iccprofile` |
+| WADO-RS 渲染参数名 | `annotations` `windowcenter` `windowwidth` `icccolorspace`（从未见于任何 WADO-RS 版本） | `annotation` `window` `iccprofile` |
 | WADO-URI 匿名化 | `anonymity=yes` | `anonymize=yes` |
 | metadata 响应 | 可能 multipart 包裹 dicom+json | 单段 dicom+json |
 | 资源集合 | 无 thumbnail / pixeldata / MPR / 3D | 新增（均可选） |
 
-库以**经典命名为默认**（现网主流），新版命名与任意私有参数通过透传机制支持（§3 D6）。
+库以**标准命名为默认**；退役方言仅在对接只认它的私有网关时经 `WithLegacyParamNames` 显式启用，任意私有参数另有透传机制兜底（§3 D6）。
 
 ---
 
@@ -150,10 +150,10 @@ wado.WithTransportWrapper(func(rt http.RoundTripper) http.RoundTripper) // 接 o
 wado.WithLogger(Logger)                               // 极简接口；nil = 静默
 ```
 
-### D6. 参数命名兼容：经典默认 + 显式透传
+### D6. 参数命名兼容：标准默认 + 退役方言显式启用
 
-- 渲染参数、匿名化参数默认发经典命名（现网主流）。
-- `WithModernParamNames()` 切换新版命名（`annotation`/`window`/`iccprofile`/`anonymize`）。
+- 渲染参数、匿名化参数默认发**现行标准命名**（`annotation`/`window`/`iccprofile`/`anonymize`；rendered 命名自 2016d 入标未变过，anonymize 自 2019a 取代 anonymity）。
+- `WithLegacyParamNames()` 显式切换退役的 WADO-WS 时代方言（`annotations`/`windowcenter`/`windowwidth`/`icccolorspace`/`anonymity`）——这些名称从未出现在任何 WADO-RS 版本里，仅用于对接只认它的私有网关；早期版本"经典命名是现网主流"的说法经逐版核对 PS3.18（2016d/2017c/2019a/现行）证伪，已在第四轮走查中翻转默认。
 - 任何场景可用 `WithRawQuery(url.Values)` 附加/覆盖查询参数，兜底所有私有网关。
 
 ### D7. 错误模型
@@ -484,3 +484,15 @@ M1–M4 + M5 核心已全部实现，46 个单元/httptest 测试全绿（`go ve
      - `multi.ErrUnknownKey` 改用 `errors.New`；`DiscardLogger` 改用 `slog.DiscardHandler`（Go 1.24+）；
      - `WithLenientUID` 注明路径穿越风险；`wadouri.New` 注明端点 URL 的 query/fragment 会被丢弃；
      - dicomx 包注释统一为英文（兑现 §9.5 的注释语言约定）。
+
+8. **代码走查修复（2026-10 第四轮，逐版核对 PS3.18：2016d / 2017c / 2019a / 现行）**：
+   - **协议一致性**：
+     - 参数命名默认翻转为**现行标准命名**：WADO-RS 渲染 `annotation`/`window`/`iccprofile`（2016d 入标即如此，`annotations`/`windowcenter`/`windowwidth`/`icccolorspace` 系退役 WADO-WS 方言、从未入标）、WADO-URI 匿名化 `anonymize`（2019a 起取代 `anonymity`）；旧方言改经 `WithLegacyParamNames` 显式启用（替代 `WithModernParamNames`，D6 重写）；
+     - WADO-URI 补 `region`↔Presentation State 互斥的本地校验（§8.2.4：region 不得与 Presentation Object UID 同现）；
+     - WADO-URI `rows`/`columns` 取消强制成对（§8.2.2：二者各自独立可选，只给一个时服务器按保持纵横比推算），查询编码相应改为各自出现；
+     - WADO-RS 字符集协商改发标准的 `charset` 查询参数（§6.5），移除非标准的 `Accept-Charset` 头。
+   - **性能**：
+     - 元数据新增流式迭代器 `StudyMetadataStream`/`SeriesMetadataStream`（`MetadataStream.Next`/`Close`），逐 part 解析、峰值内存为一个 part 而非整包；`StudyMetadata` 等聚齐形式改建于其上；
+     - 新增 `WithMaxIdleConnsPerHost`：高并发 HTTP/1.1 取图时可调大空闲连接池，避免超出池的连接用后即弃反复 TLS 握手（默认仍 8；调用方自带 Transport 不受影响）；
+     - `NewStatusError` 报文截断统一为 4KB（原读取 8KB 只保留 4KB）；
+     - 帧列表渲染长度超过 2048 字符时告警日志（网关可能回 414 URL Too Long），新增 `Core.Logger()` 访问器。

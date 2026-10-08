@@ -12,14 +12,15 @@ import (
 type Option func(*settings)
 
 type settings struct {
-	httpClient   *http.Client
-	tlsCfg       *tls.Config
-	editors      []func(*http.Request) error
-	retry        *RetryPolicy
-	logger       *slog.Logger
-	userAgent    string
-	lenientUID   bool
-	modernParams bool
+	httpClient     *http.Client
+	tlsCfg         *tls.Config
+	editors        []func(*http.Request) error
+	retry          *RetryPolicy
+	logger         *slog.Logger
+	userAgent      string
+	lenientUID     bool
+	legacyParams   bool
+	maxIdlePerHost int
 }
 
 // WithHTTPClient takes over the HTTP client entirely (proxying etc.).
@@ -107,11 +108,22 @@ func WithLogHandler(h slog.Handler) Option { return WithLogger(slog.New(h)) }
 // escapes the intended resource prefix. Only use with trusted callers.
 func WithLenientUID() Option { return func(s *settings) { s.lenientUID = true } }
 
-// WithModernParamNames switches rendered/anonymize parameters to the 2023+
-// standard names (annotation/window/iccprofile/anonymize). The default is the
-// classic naming deployed by the vast majority of servers
-// (annotations/windowcenter/windowwidth/icccolorspace/anonymity).
-func WithModernParamNames() Option { return func(s *settings) { s.modernParams = true } }
+// WithLegacyParamNames switches rendered/anonymize parameters to the retired
+// WADO-WS-era dialect (annotations/windowcenter/windowwidth/icccolorspace/
+// anonymity) for gateways that only speak it. Those names never appeared in
+// any published WADO-RS edition, so this is strictly a private-gateway
+// compatibility mode; the default is the PS3.18 parameter set (annotation /
+// window / iccprofile — the rendered names since the transaction was
+// introduced in 2016 — and anonymize, which replaced anonymity in 2019).
+func WithLegacyParamNames() Option { return func(s *settings) { s.legacyParams = true } }
+
+// WithMaxIdleConnsPerHost overrides the per-host idle-connection pool of the
+// transports the library creates (default 8). Raise it when fanning out many
+// concurrent HTTP/1.1 retrievals against one gateway, or connections beyond
+// the pool are discarded after use and pay a TLS handshake every time;
+// irrelevant for HTTP/2 (one connection multiplexes all requests). No effect
+// when WithHTTPClient supplies a client with its own transport.
+func WithMaxIdleConnsPerHost(n int) Option { return func(s *settings) { s.maxIdlePerHost = n } }
 
 // RetryPolicy describes the retry behavior for idempotent GETs.
 type RetryPolicy struct {

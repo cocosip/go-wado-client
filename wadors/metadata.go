@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,9 @@ import (
 // item per instance). dicom+json parsing is delegated to go-dicom's
 // serialization.FromJSON; relative BulkDataURIs in the returned datasets are
 // already resolved to absolute URLs (relative to this request URL).
+//
+// For very large studies prefer StudyMetadataStream: it keeps peak memory at
+// one response part instead of the whole response.
 func (c *Client) StudyMetadata(ctx context.Context, studyUID string, opts ...RetrieveOption) ([]*dataset.Dataset, error) {
 	if err := c.checkUIDs("studyUID", studyUID); err != nil {
 		return nil, err
@@ -32,37 +36,110 @@ func (c *Client) SeriesMetadata(ctx context.Context, studyUID, seriesUID string,
 	return c.metadataList(ctx, c.resourceURL("studies", studyUID, "series", seriesUID, "metadata"), opts)
 }
 
+// StudyMetadataStream streams Study-level metadata item by item; Close must
+// be called when done.
+func (c *Client) StudyMetadataStream(ctx context.Context, studyUID string, opts ...RetrieveOption) (*MetadataStream, error) {
+	if err := c.checkUIDs("studyUID", studyUID); err != nil {
+		return nil, err
+	}
+	return c.metadataStream(ctx, c.resourceURL("studies", studyUID, "metadata"), opts)
+}
+
+// SeriesMetadataStream streams Series-level metadata item by item; Close must
+// be called when done.
+func (c *Client) SeriesMetadataStream(ctx context.Context, studyUID, seriesUID string, opts ...RetrieveOption) (*MetadataStream, error) {
+	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID); err != nil {
+		return nil, err
+	}
+	return c.metadataStream(ctx, c.resourceURL("studies", studyUID, "series", seriesUID, "metadata"), opts)
+}
+
 // InstanceMetadata retrieves single-instance metadata.
 func (c *Client) InstanceMetadata(ctx context.Context, studyUID, seriesUID, sopUID string, opts ...RetrieveOption) (*dataset.Dataset, error) {
 	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID, "sopInstanceUID", sopUID); err != nil {
 		return nil, err
 	}
-	items, reqURL, err := c.metadataItems(ctx,
+	ms, err := c.metadataStream(ctx,
 		c.resourceURL("studies", studyUID, "series", seriesUID, "instances", sopUID, "metadata"), opts)
 	if err != nil {
 		return nil, err
 	}
-	if len(items) != 1 {
-		return nil, fmt.Errorf("wadors: instance metadata: expected a single item, got %d", len(items))
+	defer func() { _ = ms.Close() }()
+	ds, err := ms.Next()
+	if errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("wadors: instance metadata: expected a single item, got 0")
 	}
-	return metadataDataset(items[0], reqURL)
-}
-
-func (c *Client) metadataList(ctx context.Context, u *url.URL, opts []RetrieveOption) ([]*dataset.Dataset, error) {
-	items, reqURL, err := c.metadataItems(ctx, u, opts)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*dataset.Dataset, 0, len(items))
-	for _, item := range items {
-		ds, err := metadataDataset(item, reqURL)
+	if _, err := ms.Next(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("wadors: instance metadata: expected a single item, got more than one")
+	}
+	return ds, nil
+}
+
+func (c *Client) metadataList(ctx context.Context, u *url.URL, opts []RetrieveOption) ([]*dataset.Dataset, error) {
+	ms, err := c.metadataStream(ctx, u, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = ms.Close() }()
+	out := make([]*dataset.Dataset, 0, 16)
+	for {
+		ds, err := ms.Next()
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, ds)
 	}
-	return out, nil
 }
+
+// MetadataStream is a streaming cursor over a metadata response: parts are
+// read and parsed only as the caller advances, so peak memory stays at one
+// response part instead of the whole study. Close must be called when done.
+type MetadataStream struct {
+	mp      *Multipart
+	base    *url.URL
+	pending []json.RawMessage
+}
+
+// Next returns the next dataset; it returns io.EOF when the response is
+// exhausted. Relative BulkDataURIs are resolved against the metadata request
+// URL per PS3.18.
+func (s *MetadataStream) Next() (*dataset.Dataset, error) {
+	for {
+		if len(s.pending) > 0 {
+			item := s.pending[0]
+			s.pending = s.pending[1:]
+			return metadataDataset(item, s.base)
+		}
+		p, err := s.mp.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, io.EOF
+			}
+			return nil, err
+		}
+		b, err := io.ReadAll(p)
+		if err != nil {
+			return nil, err
+		}
+		items, err := metadataPartItems(b)
+		if err != nil {
+			return nil, err
+		}
+		s.pending = items
+	}
+}
+
+// Close closes the underlying response.
+func (s *MetadataStream) Close() error { return s.mp.Close() }
 
 // metadataDataset parses one metadata item (a bare dataset object; array
 // unwrapping happens in metadataPartItems).
@@ -78,52 +155,35 @@ func metadataDataset(raw json.RawMessage, reqURL *url.URL) (*dataset.Dataset, er
 	return ds, nil
 }
 
-// metadataItems fetches metadata and returns the individual dataset items
-// plus the final request URL (the base for relative BulkDataURI resolution
-// per PS3.18).
+// metadataStream fetches a metadata resource and returns a streaming cursor
+// over its dataset items.
 //
-// Each part is parsed independently: a part carrying a JSON array contributes
+// Each part is parsed when reached: a part carrying a JSON array contributes
 // its elements, a part carrying a bare object contributes itself. Older
 // servers that wrap dicom+json in multipart/related with one dataset per part
 // therefore parse correctly instead of yielding invalid concatenated JSON.
 // The transfer-syntax RetrieveOption is not emitted here: metadata responses
 // are always dicom+json (see WithTransferSyntax).
-func (c *Client) metadataItems(ctx context.Context, u *url.URL, opts []RetrieveOption) ([]json.RawMessage, *url.URL, error) {
+func (c *Client) metadataStream(ctx context.Context, u *url.URL, opts []RetrieveOption) (*MetadataStream, error) {
 	cfg := buildRetrieveCfg(opts)
+	applyCharset(u, cfg.charset)
 	resp, err := c.do(ctx, u, func(req *http.Request) {
 		accept := cfg.acceptOverride
 		if accept == "" {
 			accept = "application/dicom+json"
 		}
 		req.Header.Set("Accept", accept)
-		if cfg.charset != "" {
-			req.Header.Set("Accept-Charset", cfg.charset)
-		}
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	mp, err := newMultipart(resp)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	defer func() { _ = mp.Close() }()
-	var items []json.RawMessage
-	for p, err := range mp.Parts() {
-		if err != nil {
-			return nil, nil, err
-		}
-		b, err := io.ReadAll(p)
-		if err != nil {
-			return nil, nil, err
-		}
-		partItems, err := metadataPartItems(b)
-		if err != nil {
-			return nil, nil, err
-		}
-		items = append(items, partItems...)
-	}
-	return items, resp.Request.URL, nil
+	// The final (post-redirect) request URL is the PS3.18 base for relative
+	// BulkDataURI resolution.
+	return &MetadataStream{mp: mp, base: resp.Request.URL}, nil
 }
 
 // metadataPartItems extracts the dataset items of one metadata part: either

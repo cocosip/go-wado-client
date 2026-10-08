@@ -15,7 +15,7 @@ import (
 // RenderedOption customizes rendered retrieval.
 type RenderedOption func(*renderedCfg)
 
-// Window LUT function keywords of the modern window parameter, which per
+// Window LUT function keywords of the standard window parameter, which per
 // PS3.18 §8.3.5 is window=center,width,function (all three values mandatory).
 const (
 	WindowFunctionLinear      = "linear"
@@ -57,11 +57,11 @@ func WithWindow(center, width float64) RenderedOption {
 	return func(c *renderedCfg) { c.window = [2]float64{center, width}; c.hasWindow = true }
 }
 
-// WithWindowFunction selects the VOI LUT function carried by the modern
+// WithWindowFunction selects the VOI LUT function carried by the standard
 // window parameter: WindowFunctionLinear (the default when unset),
-// WindowFunctionLinearExact or WindowFunctionSigmoid. The classic
+// WindowFunctionLinearExact or WindowFunctionSigmoid. The legacy
 // windowcenter/windowwidth pair has no function component, so the value is
-// ignored in classic mode.
+// ignored in legacy mode (WithLegacyParamNames).
 func WithWindowFunction(fn string) RenderedOption {
 	return func(c *renderedCfg) { c.voiFunction = fn }
 }
@@ -100,25 +100,13 @@ func buildRenderedCfg(opts []RenderedOption) renderedCfg {
 	return cfg
 }
 
-// query builds the rendered query parameters; names switch between classic
-// and modern according to the core setting.
-func (cfg renderedCfg) query(modern bool) url.Values {
+// query builds the rendered query parameters; the PS3.18 names are the
+// default, WithLegacyParamNames switches to the retired WADO-WS-era dialect.
+func (cfg renderedCfg) query(legacy bool) url.Values {
 	q := url.Values{}
-	if modern {
-		if len(cfg.annotations) > 0 {
-			q.Set("annotation", strings.Join(cfg.annotations, ","))
-		}
-		if cfg.hasWindow {
-			fn := cfg.voiFunction
-			if fn == "" {
-				fn = WindowFunctionLinear
-			}
-			q.Set("window", formatFloat(cfg.window[0])+","+formatFloat(cfg.window[1])+","+fn)
-		}
-		if cfg.icc != "" {
-			q.Set("iccprofile", cfg.icc)
-		}
-	} else {
+	if legacy {
+		// Not part of any published WADO-RS edition; some deployed gateways
+		// only answer to these names.
 		if len(cfg.annotations) > 0 {
 			q.Set("annotations", strings.Join(cfg.annotations, ","))
 		}
@@ -128,6 +116,22 @@ func (cfg renderedCfg) query(modern bool) url.Values {
 		}
 		if cfg.icc != "" {
 			q.Set("icccolorspace", cfg.icc)
+		}
+	} else {
+		if len(cfg.annotations) > 0 {
+			q.Set("annotation", strings.Join(cfg.annotations, ","))
+		}
+		if cfg.hasWindow {
+			// PS3.18 §8.3.5: window=center,width,function, all three values
+			// mandatory.
+			fn := cfg.voiFunction
+			if fn == "" {
+				fn = WindowFunctionLinear
+			}
+			q.Set("window", formatFloat(cfg.window[0])+","+formatFloat(cfg.window[1])+","+fn)
+		}
+		if cfg.icc != "" {
+			q.Set("iccprofile", cfg.icc)
 		}
 	}
 	if cfg.quality > 0 {
@@ -213,7 +217,7 @@ func (c *Client) retrieveRendered(ctx context.Context, u *url.URL, opts []Render
 	if cfg.quality != 0 && (cfg.quality < 1 || cfg.quality > 100) {
 		return nil, &wado.RequestError{Field: "quality", Reason: "must be within 1..100"}
 	}
-	u.RawQuery = cfg.query(c.core.ModernParams()).Encode()
+	u.RawQuery = cfg.query(c.core.LegacyParams()).Encode()
 
 	resp, err := c.do(ctx, u, func(req *http.Request) { req.Header.Set("Accept", format) })
 	if err != nil {

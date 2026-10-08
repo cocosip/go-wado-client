@@ -437,3 +437,38 @@ func TestStatusErrorURLRedaction(t *testing.T) {
 	}
 	_ = se.Error() // must not panic on the redacted URL
 }
+
+// TestWithMaxIdleConnsPerHost verifies the idle-pool override: it applies to
+// transports the library builds, and is left alone when the caller supplies
+// a client with its own transport.
+func TestWithMaxIdleConnsPerHost(t *testing.T) {
+	core := mustCore(t, WithMaxIdleConnsPerHost(64))
+	tpt, ok := core.hc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", core.hc.Transport)
+	}
+	if tpt.MaxIdleConnsPerHost != 64 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 64", tpt.MaxIdleConnsPerHost)
+	}
+
+	// Default stays at the library default when the option is absent.
+	coreDefault := mustCore(t)
+	tptDefault, ok := coreDefault.hc.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", coreDefault.hc.Transport)
+	}
+	if tptDefault.MaxIdleConnsPerHost != 8 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want the default 8", tptDefault.MaxIdleConnsPerHost)
+	}
+
+	// A caller-supplied client without TLS config is handed back untouched.
+	callerTpt := http.DefaultTransport.(*http.Transport).Clone()
+	custom := &http.Client{Transport: callerTpt}
+	coreCustom := mustCore(t, WithHTTPClient(custom), WithMaxIdleConnsPerHost(64))
+	if coreCustom.hc != custom || coreCustom.hc.Transport.(*http.Transport) != callerTpt {
+		t.Error("WithHTTPClient without TLS must keep the caller's client and transport")
+	}
+	if callerTpt.MaxIdleConnsPerHost == 64 {
+		t.Error("WithMaxIdleConnsPerHost must not mutate a caller-supplied transport")
+	}
+}

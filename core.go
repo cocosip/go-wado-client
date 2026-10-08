@@ -31,7 +31,7 @@ type Core struct {
 	logger       *slog.Logger
 	ua           string
 	lenientUID   bool
-	modernParams bool
+	legacyParams bool
 }
 
 // NewCore builds a shared core from the given options. It fails when the
@@ -62,7 +62,7 @@ func coreFromSettings(s *settings) (*Core, error) {
 		logger:       DiscardLogger,
 		ua:           s.userAgent,
 		lenientUID:   s.lenientUID,
-		modernParams: s.modernParams,
+		legacyParams: s.legacyParams,
 	}
 	if c.ua == "" {
 		c.ua = DefaultUserAgent
@@ -85,7 +85,7 @@ func (c *Core) Fork(opts ...Option) (*Core, error) {
 		logger:       c.logger,
 		userAgent:    c.ua,
 		lenientUID:   c.lenientUID,
-		modernParams: c.modernParams,
+		legacyParams: c.legacyParams,
 	}
 	if c.retry.MaxAttempts > 1 {
 		cp := c.retry
@@ -102,6 +102,7 @@ func (s *settings) httpClientOrDefault() (*http.Client, error) {
 			return s.httpClient, nil
 		case s.httpClient.Transport == nil:
 			t := defaultTransport()
+			applyIdleConnsPerHost(t, s.maxIdlePerHost)
 			t.TLSClientConfig = s.tlsCfg
 			c2 := *s.httpClient
 			c2.Transport = t
@@ -122,10 +123,19 @@ func (s *settings) httpClientOrDefault() (*http.Client, error) {
 		}
 	}
 	t := defaultTransport()
+	applyIdleConnsPerHost(t, s.maxIdlePerHost)
 	if s.tlsCfg != nil {
 		t.TLSClientConfig = s.tlsCfg
 	}
 	return &http.Client{Transport: t}, nil
+}
+
+// applyIdleConnsPerHost applies the WithMaxIdleConnsPerHost override to a
+// library-built transport; non-positive values keep the default.
+func applyIdleConnsPerHost(t *http.Transport, n int) {
+	if n > 0 {
+		t.MaxIdleConnsPerHost = n
+	}
 }
 
 // defaultTransport follows design decision D4: fine-grained timeouts and no
@@ -285,8 +295,13 @@ func (c *Core) CheckUID(field, uid string) error {
 	return nil
 }
 
-// ModernParams reports whether 2023+ parameter names are in use.
-func (c *Core) ModernParams() bool { return c.modernParams }
+// LegacyParams reports whether the retired WADO-WS-era parameter names are in
+// use (WithLegacyParamNames); the default is the current PS3.18 naming.
+func (c *Core) LegacyParams() bool { return c.legacyParams }
+
+// Logger returns the core's logger — DiscardLogger unless one was injected
+// via WithLogger/WithLogHandler.
+func (c *Core) Logger() *slog.Logger { return c.logger }
 
 // LenientUID reports whether UID validation is relaxed.
 func (c *Core) LenientUID() bool { return c.lenientUID }

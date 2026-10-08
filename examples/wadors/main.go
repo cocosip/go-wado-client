@@ -98,7 +98,8 @@ func clientOptions(insecure bool) []wado.Option {
 	//   wado.WithRequestEditor(func(r *http.Request) error { ...private signature headers... })
 	//   wado.WithHTTPClient(customClient)   // proxying, global policies
 	//   wado.WithLenientUID()               // private gateways with non-conformant UIDs
-	//   wado.WithModernParamNames()         // annotation/window/iccprofile/anonymize naming
+	//   wado.WithLegacyParamNames()         // retired WADO-WS-era dialect (annotations/windowcenter/...)
+	//   wado.WithMaxIdleConnsPerHost(32)    // raise for many concurrent HTTP/1.1 retrievals
 	//   wado.WithLogHandler(handler)        // == WithLogger(slog.New(handler))
 	return opts
 }

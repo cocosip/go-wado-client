@@ -100,10 +100,11 @@ if resp.IsDICOM() { io.Copy(f, resp.Body) }
 
 Local validation rejects up front everything the standard says a server must
 answer with 400: the window pair / presentation pair and their mutual
-exclusion, the rendered-only parameters (frameNumber, imageQuality,
-rows/columns, region, annotation) combined with `application/dicom`, the
-DICOM-only `anonymize` switch combined with a rendered content type, invalid
-media types, and UID whitelist violations.
+exclusions (including `region` vs. presentation state), the rendered-only
+parameters (frameNumber, imageQuality, rows/columns, region, annotation)
+combined with `application/dicom`, the DICOM-only `anonymize` switch combined
+with a rendered content type, invalid media types, and UID whitelist
+violations.
 
 ## Multiple hospitals / tenants
 
@@ -158,19 +159,21 @@ Shared options (`wado.Option`, apply to both clients and the registry):
 `WithBasicAuth`, `WithBearerTokenSource`, `WithRequestEditor`,
 `WithHTTPClient`, `WithTLSClientConfig`, `WithRetry`, `WithUserAgent`,
 `WithLogger(*slog.Logger)`, `WithLogHandler(slog.Handler)`,
-`WithLenientUID`, `WithModernParamNames`.
+`WithMaxIdleConnsPerHost`, `WithLenientUID`, `WithLegacyParamNames`.
 
 Notes:
 
 - **Logging** uses `log/slog` and is strictly opt-in: nothing is logged
   unless you inject a logger; the library never falls back to
   `slog.Default()`.
-- **Parameter naming** defaults to the classic names spoken by deployed
-  PACS today (`annotations`, `windowcenter`/`windowwidth`, `anonymity`);
-  `WithModernParamNames()` switches to the current standard names
-  (`annotation`, `window=center,width,function`, `anonymize` —
+- **Parameter naming** follows the current PS3.18 names by default
+  (`annotation`, `window=center,width,function`, `iccprofile`, `anonymize`;
   `WithWindowFunction` picks the VOI LUT function, `linear` by default).
-  `WithRawQuery` is the escape hatch for private gateways.
+  `WithLegacyParamNames()` switches to the retired WADO-WS-era dialect
+  (`annotations`, `windowcenter`/`windowwidth`, `icccolorspace`, `anonymity`)
+  for private gateways that only answer to it — those names never appeared
+  in any published WADO-RS edition. `WithRawQuery` is the escape hatch for
+  anything else.
 - **Transfer syntax** negotiation accepts a UID or the PS3.18 wildcard `*`
   ("any transfer syntax the server supports"); it applies to the multipart
   retrieves (instances/frames) only — metadata is always dicom+json.

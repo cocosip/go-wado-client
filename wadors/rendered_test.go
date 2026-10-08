@@ -21,7 +21,7 @@ func newRenderedServer(t *testing.T, got *captured) *httptest.Server {
 	}))
 }
 
-func TestRetrieveRenderedInstanceClassicNames(t *testing.T) {
+func TestRetrieveRenderedInstanceStandardNames(t *testing.T) {
 	var got captured
 	srv := newRenderedServer(t, &got)
 	defer srv.Close()
@@ -42,20 +42,25 @@ func TestRetrieveRenderedInstanceClassicNames(t *testing.T) {
 	if got.path != "/api/wado/H1/studies/1.2.3/series/1.2.4/instances/1.2.5/rendered" {
 		t.Errorf("path = %q", got.path)
 	}
-	if v := got.query.Get("annotations"); v != "patient,technique" {
-		t.Errorf("annotations = %q", v)
+	// PS3.18 §8.3.5: the standard parameter names are the default.
+	if v := got.query.Get("annotation"); v != "patient,technique" {
+		t.Errorf("annotation = %q", v)
 	}
-	if v := got.query.Get("windowcenter"); v != "40" {
-		t.Errorf("windowcenter = %q", v)
-	}
-	if v := got.query.Get("windowwidth"); v != "400" {
-		t.Errorf("windowwidth = %q", v)
+	// window=center,width,function with all three values mandatory (§8.3.5).
+	if v := got.query.Get("window"); v != "40,400,linear" {
+		t.Errorf("window = %q", v)
 	}
 	if v := got.query.Get("quality"); v != "90" {
 		t.Errorf("quality = %q", v)
 	}
 	if v := got.query.Get("viewport"); v != "512,512" {
 		t.Errorf("viewport = %q", v)
+	}
+	// The retired WADO-WS-era names must not appear in the default mode.
+	for _, k := range []string{"annotations", "windowcenter", "windowwidth", "icccolorspace"} {
+		if _, ok := got.query[k]; ok {
+			t.Errorf("legacy parameter %q present in default mode", k)
+		}
 	}
 	if img.ContentType != "image/png" {
 		t.Errorf("ContentType = %q", img.ContentType)
@@ -66,12 +71,12 @@ func TestRetrieveRenderedInstanceClassicNames(t *testing.T) {
 	}
 }
 
-func TestRetrieveRenderedInstanceModernNames(t *testing.T) {
+func TestRetrieveRenderedInstanceLegacyNames(t *testing.T) {
 	var got captured
 	srv := newRenderedServer(t, &got)
 	defer srv.Close()
 
-	c, _ := New(srv.URL+"/api/wado/H1", wado.WithModernParamNames())
+	c, _ := New(srv.URL+"/api/wado/H1", wado.WithLegacyParamNames())
 	img, err := c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
 		WithAnnotation("patient"),
 		WithWindow(40, 400),
@@ -82,21 +87,22 @@ func TestRetrieveRenderedInstanceModernNames(t *testing.T) {
 	}
 	defer func() { _ = img.Close() }()
 
-	if v := got.query.Get("annotation"); v != "patient" {
-		t.Errorf("annotation = %q", v)
+	if v := got.query.Get("annotations"); v != "patient" {
+		t.Errorf("annotations = %q", v)
 	}
-	// PS3.18 §8.3.5: all three components (center,width,function) are
-	// mandatory; the function defaults to linear.
-	if v := got.query.Get("window"); v != "40,400,linear" {
-		t.Errorf("window = %q", v)
+	if v := got.query.Get("windowcenter"); v != "40" {
+		t.Errorf("windowcenter = %q", v)
 	}
-	if v := got.query.Get("iccprofile"); v != "sRGB" {
-		t.Errorf("iccprofile = %q", v)
+	if v := got.query.Get("windowwidth"); v != "400" {
+		t.Errorf("windowwidth = %q", v)
 	}
-	// Classic names must not appear in modern mode.
-	for _, k := range []string{"annotations", "windowcenter", "windowwidth", "icccolorspace"} {
+	if v := got.query.Get("icccolorspace"); v != "sRGB" {
+		t.Errorf("icccolorspace = %q", v)
+	}
+	// The standard names must not appear in legacy mode.
+	for _, k := range []string{"annotation", "window", "iccprofile"} {
 		if _, ok := got.query[k]; ok {
-			t.Errorf("classic parameter %q present in modern mode", k)
+			t.Errorf("standard parameter %q present in legacy mode", k)
 		}
 	}
 }
@@ -152,9 +158,21 @@ func TestRenderedWindowFormatNoExponent(t *testing.T) {
 	srv := newRenderedServer(t, &got)
 	defer srv.Close()
 
-	// Classic names.
+	// Standard names.
 	c, _ := New(srv.URL + "/api/wado/H1")
 	img, err := c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
+		WithWindow(1e7, 4e7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = img.Close()
+	if v := got.query.Get("window"); v != "10000000,40000000,linear" {
+		t.Errorf("window = %q, want 10000000,40000000,linear", v)
+	}
+
+	// Legacy names.
+	c, _ = New(srv.URL+"/api/wado/H1", wado.WithLegacyParamNames())
+	img, err = c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
 		WithWindow(1e7, 4e7))
 	if err != nil {
 		t.Fatal(err)
@@ -166,29 +184,17 @@ func TestRenderedWindowFormatNoExponent(t *testing.T) {
 	if v := got.query.Get("windowwidth"); v != "40000000" {
 		t.Errorf("windowwidth = %q, want 40000000", v)
 	}
-
-	// Modern names.
-	c, _ = New(srv.URL+"/api/wado/H1", wado.WithModernParamNames())
-	img, err = c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
-		WithWindow(1e7, 4e7))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = img.Close()
-	if v := got.query.Get("window"); v != "10000000,40000000,linear" {
-		t.Errorf("window = %q, want 10000000,40000000,linear", v)
-	}
 }
 
-// TestRenderedWindowFunction covers the modern window=function component:
-// PS3.18 §8.3.5 requires all three values; classic windowcenter/windowwidth
-// have no function component and must ignore the option.
+// TestRenderedWindowFunction covers the window=function component:
+// PS3.18 §8.3.5 requires all three values; the legacy windowcenter/windowwidth
+// pair has no function component and must ignore the option.
 func TestRenderedWindowFunction(t *testing.T) {
 	var got captured
 	srv := newRenderedServer(t, &got)
 	defer srv.Close()
 
-	c, _ := New(srv.URL+"/api/wado/H1", wado.WithModernParamNames())
+	c, _ := New(srv.URL + "/api/wado/H1")
 	img, err := c.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
 		WithWindow(40, 400), WithWindowFunction(WindowFunctionSigmoid))
 	if err != nil {
@@ -206,16 +212,16 @@ func TestRenderedWindowFunction(t *testing.T) {
 		t.Errorf("unknown function err = %v, want ErrInvalidRequest", err)
 	}
 
-	// Classic mode has no function component; the option is a no-op there.
-	classic, _ := New(srv.URL + "/api/wado/H1")
-	img, err = classic.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
+	// Legacy mode has no function component; the option is a no-op there.
+	legacy, _ := New(srv.URL+"/api/wado/H1", wado.WithLegacyParamNames())
+	img, err = legacy.RetrieveRenderedInstance(context.Background(), "1.2.3", "1.2.4", "1.2.5",
 		WithWindow(40, 400), WithWindowFunction(WindowFunctionSigmoid))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = img.Close()
 	if v := got.query.Get("windowcenter"); v != "40" || got.query.Get("windowwidth") != "400" {
-		t.Errorf("classic window = %q/%q, want 40/400 without a function component",
+		t.Errorf("legacy window = %q/%q, want 40/400 without a function component",
 			got.query.Get("windowcenter"), got.query.Get("windowwidth"))
 	}
 }

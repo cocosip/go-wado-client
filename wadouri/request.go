@@ -23,6 +23,8 @@ const (
 	reasonSetTogether = "must be set together"
 	// reasonNeedsRendered is shared by the rendered-only-parameter checks.
 	reasonNeedsRendered = "requires a rendered contentType"
+	// fieldRegion is the error field name of the region parameter.
+	fieldRegion = "Region"
 )
 
 // Request holds the WADO-URI retrieval parameters.
@@ -38,8 +40,8 @@ type Request struct {
 
 	TransferSyntax string
 	Charset        string
-	// Anonymize is emitted as anonymity=yes (anonymize=yes with modern
-	// names). It is a DICOM-only parameter: PS3.18 §8.1 forbids it together
+	// Anonymize is emitted as anonymize=yes (anonymity=yes with legacy
+	// naming). It is a DICOM-only parameter: PS3.18 §8.1 forbids it together
 	// with a rendered contentType.
 	Anonymize  bool
 	Annotation []string // "patient" / "technique"; rendered-only (PS3.18 §8.2)
@@ -49,9 +51,12 @@ type Request struct {
 	// application/dicom content type (the server would answer 400).
 	FrameNumber  int // 1-based; 0 = absent
 	ImageQuality int // 1..100; 0 = absent
-	Rows         int // paired with Columns; 0 = absent
-	Columns      int
-	Region       *[4]float64 // xmin,ymin,xmax,ymax normalized to 0..1; nil = absent
+	// Rows/Columns cap the rendered image size; each is independently
+	// optional (PS3.18 §8.2.2: when only one is given, the server chooses
+	// the other to preserve the aspect ratio); 0 = absent.
+	Rows    int
+	Columns int
+	Region  *[4]float64 // xmin,ymin,xmax,ymax normalized to 0..1; nil = absent
 
 	// Window center/width: set together, mutually exclusive with
 	// Presentation*, and not allowed for application/dicom.
@@ -136,8 +141,8 @@ func (r Request) validateUIDs(checkUID func(field, uid string) error) error {
 }
 
 // validateWindowAndPresentation enforces the window pair, the presentation
-// state pair, their mutual exclusion, and that windowing only combines with
-// a rendered content type.
+// state pair, and their mutual exclusion, and that windowing only combines
+// with a rendered content type.
 func (r Request) validateWindowAndPresentation(isDICOM bool) error {
 	if (r.WindowCenter != nil) != (r.WindowWidth != nil) {
 		return &wado.RequestError{Field: "WindowCenter/WindowWidth", Reason: reasonSetTogether}
@@ -156,18 +161,15 @@ func (r Request) validateWindowAndPresentation(isDICOM bool) error {
 	return nil
 }
 
-// validateRenderedValues checks the rendered-only parameters: the paired
-// rows/columns constraint, their exclusion from the DICOM instance
-// transaction (PS3.18 §8.2: they apply to image retrieval only — a request
-// carrying them for a non-image object is answered 400), the anonymize
-// direction (PS3.18 §8.1: DICOM responses only), the region bounds, and the
-// remaining value ranges.
+// validateRenderedValues checks the rendered-only parameters: their exclusion
+// from the DICOM instance transaction (PS3.18 §8.2: they apply to image
+// retrieval only — a request carrying them for a non-image object is answered
+// 400), the anonymize direction (PS3.18 §8.1: DICOM responses only), the
+// region constraints (PS3.18 §8.2.4: normalized 0..1, forbidden together with
+// a Presentation Object), and the remaining value ranges.
 func (r Request) validateRenderedValues(isDICOM bool) error {
 	if r.Anonymize && !isDICOM {
 		return &wado.RequestError{Field: "Anonymize", Reason: "requires the application/dicom contentType"}
-	}
-	if (r.Rows > 0) != (r.Columns > 0) {
-		return &wado.RequestError{Field: "Rows/Columns", Reason: reasonSetTogether}
 	}
 	if isDICOM {
 		switch {
@@ -178,17 +180,23 @@ func (r Request) validateRenderedValues(isDICOM bool) error {
 		case r.Rows != 0 || r.Columns != 0:
 			return &wado.RequestError{Field: "Rows/Columns", Reason: reasonNeedsRendered}
 		case r.Region != nil:
-			return &wado.RequestError{Field: "Region", Reason: reasonNeedsRendered}
+			return &wado.RequestError{Field: fieldRegion, Reason: reasonNeedsRendered}
 		case len(r.Annotation) > 0:
 			// PS3.18 §8.2: "It shall not be present if contentType is
 			// application/dicom".
 			return &wado.RequestError{Field: "Annotation", Reason: reasonNeedsRendered}
 		}
 	}
+	hasPres := r.PresentationUID != "" || r.PresentationSeriesUID != ""
+	if r.Region != nil && hasPres {
+		// PS3.18 §8.2.4: region "shall not be present if the Unique
+		// Identifier of the Presentation Object parameter is present".
+		return &wado.RequestError{Field: fieldRegion, Reason: "region and presentation state are mutually exclusive"}
+	}
 	if r.Region != nil {
 		x1, y1, x2, y2 := r.Region[0], r.Region[1], r.Region[2], r.Region[3]
 		if !(x1 >= 0 && x1 < x2 && x2 <= 1) || !(y1 >= 0 && y1 < y2 && y2 <= 1) {
-			return &wado.RequestError{Field: "Region", Reason: "require 0<=xmin<xmax<=1 and 0<=ymin<ymax<=1"}
+			return &wado.RequestError{Field: fieldRegion, Reason: "require 0<=xmin<xmax<=1 and 0<=ymin<ymax<=1"}
 		}
 	}
 	if r.FrameNumber < 0 {
@@ -205,9 +213,10 @@ func (r Request) validateRenderedValues(isDICOM bool) error {
 	return nil
 }
 
-// query encodes the query parameters; classic naming is the default (what
-// the deployed majority speaks) and modern switches to the 2023+ names.
-func (r Request) query(modern bool) url.Values {
+// query encodes the query parameters; the current PS3.18 naming is the
+// default (anonymize, in force since 2019) and legacy switches the
+// anonymization key to the pre-2019 name (anonymity).
+func (r Request) query(legacy bool) url.Values {
 	q := url.Values{}
 	q.Set("requestType", "WADO")
 	q.Set("studyUID", r.StudyUID)
@@ -223,10 +232,10 @@ func (r Request) query(modern bool) url.Values {
 		q.Set("charset", r.Charset)
 	}
 	if r.Anonymize {
-		if modern {
-			q.Set("anonymize", anonymizeEnabled)
-		} else {
+		if legacy {
 			q.Set("anonymity", anonymizeEnabled)
+		} else {
+			q.Set("anonymize", anonymizeEnabled)
 		}
 	}
 	if len(r.Annotation) > 0 {
@@ -240,6 +249,8 @@ func (r Request) query(modern bool) url.Values {
 	}
 	if r.Rows > 0 {
 		q.Set("rows", strconv.Itoa(r.Rows))
+	}
+	if r.Columns > 0 {
 		q.Set("columns", strconv.Itoa(r.Columns))
 	}
 	if r.Region != nil {
