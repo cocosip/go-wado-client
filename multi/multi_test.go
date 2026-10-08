@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocosip/go-wado-client"
+	"github.com/cocosip/go-wado-client/qido"
 	"github.com/cocosip/go-wado-client/wadouri"
 )
 
@@ -26,6 +27,8 @@ func mustRegistry[K comparable](t *testing.T, resolver Resolver[K], defaults ...
 	}
 	return reg
 }
+
+const testTenant = "hosp-a"
 
 // routeKey is the business-defined composite key (tenant + business line).
 type routeKey struct{ Tenant, Biz string }
@@ -70,10 +73,10 @@ func TestRegistryStaticCompositeKey(t *testing.T) {
 	defer srv.Close()
 
 	reg := mustRegistry(t, Static[routeKey](map[routeKey]Endpoint{
-		{Tenant: "hosp-a", Biz: "ct"}: endpoint(srv.URL, "/api/wado/hosp-a/ct"),
+		{Tenant: testTenant, Biz: "ct"}: endpoint(srv.URL, "/api/wado/hosp-a/ct"),
 	}))
 
-	g, err := reg.Client(context.Background(), routeKey{Tenant: "hosp-a", Biz: "ct"})
+	g, err := reg.Client(context.Background(), routeKey{Tenant: testTenant, Biz: "ct"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,5 +391,53 @@ func TestNewRegistryRejectsBadDefaults(t *testing.T) {
 		wado.WithHTTPClient(custom), wado.WithTLSClientConfig(&tls.Config{}))
 	if err == nil {
 		t.Error("contradictory defaults expected an error")
+	}
+}
+
+// TestQidoRoute verifies the third (QIDO-RS) route: an endpoint carrying
+// only a QidoRoute builds a Gateway with just the Qido client, wired end to
+// end through Template placeholders.
+func TestQidoRoute(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/qido/hosp-a/studies" && r.URL.Query().Get("PatientID") == "11235813" {
+			w.Header().Set("Content-Type", "application/dicom+json")
+			_, _ = w.Write([]byte(`[{"0020000D":{"vr":"UI","Value":["1.2.3"]}}]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	res := Template("https://unused", Routes{
+		QIDO: "/api/qido/{hospitalCode}",
+	}, func(k routeKey) map[string]string {
+		return map[string]string{"hospitalCode": k.Tenant}
+	})
+	ep, err := res.Resolve(context.Background(), routeKey{Tenant: testTenant, Biz: "ct"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep.QidoRoute != "/api/qido/hosp-a" {
+		t.Errorf("QidoRoute = %q", ep.QidoRoute)
+	}
+
+	reg := mustRegistry(t, Static[routeKey](map[routeKey]Endpoint{
+		{Tenant: testTenant, Biz: "ct"}: {Base: srv.URL, QidoRoute: "/api/qido/hosp-a"},
+	}))
+	g, err := reg.Client(context.Background(), routeKey{Tenant: testTenant, Biz: "ct"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.RS != nil || g.URI != nil || g.Qido == nil {
+		t.Fatalf("gateway = RS:%v URI:%v Qido:%v; want Qido only", g.RS, g.URI, g.Qido)
+	}
+	res2, err := g.Qido.SearchStudies(context.Background(), qido.Query{
+		Match: []qido.Match{{Attribute: "PatientID", Value: "11235813"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res2.Datasets) != 1 {
+		t.Fatalf("datasets = %d, want 1", len(res2.Datasets))
 	}
 }

@@ -158,7 +158,7 @@ func defaultTransport() *http.Transport {
 // by http.NewRequest for in-memory readers); a body that cannot be replayed
 // while retry is enabled is rejected up front instead of being silently
 // truncated on the second attempt. All requests issued by this library are
-// bodyless GETs.
+// bodyless (GET/OPTIONS).
 func (c *Core) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	p := c.retry.normalized()
 	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil && p.MaxAttempts > 1 {

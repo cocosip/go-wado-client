@@ -422,6 +422,67 @@ res, _ := g.URI.Retrieve(ctx, wadouri.Request{
 
 后续可自然扩展：QIDO-RS（查询）、STOW-RS（上传）复用同一 Client/传输层。
 
+### 7.1 扩展一：QIDO-RS 与能力发现（已实现，2026-10）
+
+#### 标准调研结论（逐版核对：现行 2026d / 2019a / 2016e）
+
+**QIDO-RS（现行 §10.6 Search Transaction，原 6.7）**：
+
+- 6 个查询资源（Table 10.6.1-1，全 GET）：`/studies`、`/studies/{study}/series`、
+  `/studies/{study}/instances`（关系型，O）、`/series`（O）、
+  `/studies/{study}/series/{series}/instances`、`/instances`（O）。
+- 查询参数公共表在 **§8.3.4 Table 8.3.4-1**（不在 10.6 内）：`{attributeID}={value}`
+  匹配键（tag / 关键字 / 点分序列路径三种形式；C-FIND 匹配语义：精确、`*`/`?` 通配、
+  日期时间区间 `v1-v2` 可开区间、UID 列表单参数逗号连接）、`includefield=1#attr|all`、
+  `fuzzymatching=true|false`、`limit=uint`、`offset=uint`，现行版新增
+  `emptyvaluematching`、`multiplevaluematching`。编码规则：`# [ ] & = ,` 与非 ASCII
+  须百分号编码；标准自身示例的列表逗号保持裸形式（`includefield=00081048,00081049`）。
+- **`orderby`（`-` 前缀降序、逗号多键）与 `aetitle` 不在任何版本的公共参数表中**：
+  按"生态扩展（dcm4chee 语法，单参数逗号连接）"建模为一等字段并如实注释；
+  Azure DICOM v1 连 fuzzy 之外的部分参数都不支持——因此全部参数都可以留空交服务器默认。
+- 请求：`Accept: application/dicom+json`（或 `multipart/related; type="application/dicom+xml"`），
+  双端必选支持其一即可。
+- 响应：**204 = 无匹配（成功，非错误）**；200 返回数据集数组（JSON 为单段；老服务器可能
+  multipart 包裹）；`Warning: 299 ... N additional results ...` 提示剩余可翻页数；
+  各层级必返属性含 Study/Series/SOP Instance UID、NumberOf*Related* 计数
+  （0020,1206/1208/1209）、RetrieveURL(0008,1190)、SpecificCharacterSet。
+
+**能力发现（HTTP OPTIONS；DICOMweb 侧 §8.9 Retrieve Capabilities）**：
+
+- HTTP 层：OPTIONS 为标准方法，RFC 9110 规定 200 响应**必带 `Allow` 头**
+  （该资源支持的方法清单）——现网 Orthanc / dcm4chee / 医院网关服务发现的主流现实。
+- DICOMweb 层：§8.9 规定所有 REST 服务**应实现**该事务：`OPTIONS` 打到服务 Base URI
+  （无查询参数、无请求体），服务器须以可接受媒体类型返回 **Annex H Capabilities
+  Description**（WADL 文档：`application` → `resources@base` → `resource@Path`
+  （可嵌套子资源）→ `method@Name` → `response`/`representation@mediaType`）。
+  **§8.9.4 规定的媒体类型：`application/vnd.sun.wadl+xml` 与 `application/json`**
+  （JSON 表示为 Annex G，BadgerFish 约定：属性 `@` 前缀、文本 `value`、重复元素数组）。
+  WADL 自身不含 Capabilities 资源条目（"WADL is not self-describing"）。
+
+#### 设计决策
+
+- **D11. 通用层收敛**：新增根包 `wado.Service`（Core→Service→事务客户端三层：
+  URL 策略 + method 化的 Do + 非 2xx→StatusError + UID 白名单），wadors/wadouri/qido
+  统一持有一个 Service，**公开 API 零变化**；`internal/queryx`（FormatFloat）、
+  `internal/dicomjson`（dicom+json 流式 item 解码 + BulkDataURI 绝对化，wadors 元数据
+  与 qido 共用）、`internal/multipartx`（multipart/related 最小游标 + 单段容错）。
+- **D12. QIDO 查询编码**：`Query` 结构按 §8.3.4 建模（匹配键保序可重复、tri-state 布尔
+  `nil`=省略、limit/offset 指针/零值语义）；键位字符串走白名单（`[A-Za-z0-9_.]`+点分），
+  值按 `url.QueryEscape` 后恢复裸逗号（与标准示例逐字节一致）；`Extra` 透传兜底
+  （覆盖同名标准参数）。分页按标准为客户端驱动（`Results.AdditionalResults()` 解析
+  Warning 299），**不做**非标自动翻页器。dicom+xml 协商（仅经 `WithAccept` 可达）显式报错。
+- **D13. 能力发现双层建模**：`Capabilities{Allow, WADL, Raw, StatusCode, Header}`——
+  `Allow` 容错解析（大小写/空白/多 Header/重复项，`Supports()`）；
+  WADL XML（`encoding/xml`）与 JSON（BadgerFish，`encoding/json`）两表示归一为同一
+  `WADL` 模型（嵌套 resource 展平、路径拼接）；无 payload / 未知媒体类型降级为
+  Allow+Raw 透传；405/501 由 `IsCapabilitiesUnsupported()` 判定（老网关不支持 OPTIONS）。
+  Accept 缺省同时声明两种标准媒体类型。wadors/qido 各有 `Capabilities()` 便捷方法；
+  `multi.Endpoint.QidoRoute`/`Routes.QIDO`/`Gateway.Qido` 支持第三条路由。
+- **测试**：qido 编码矩阵（逐字节断言 RawQuery）、注入向量本地拒绝（服务器不达）、
+  6 资源路径矩阵、204/空数组、Warning 299、multipart 包裹、流式/聚合一致性、XML 守卫；
+  caps 的 Allow 形态矩阵、WADL XML/JSON 双表示、未知 payload 透传、204、501、
+  子资源定位、Accept 覆盖。
+
 ## 8. 开放问题（不阻塞 M1 开工，按默认值推进）
 
 1. **鉴权方式**：医院侧是 Basic / OAuth2 Bearer / 私有签名头？→ 已全部预留插拔点，默认 Basic。

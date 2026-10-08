@@ -51,7 +51,7 @@ func (c *Client) retrieveMultipart(ctx context.Context, u *url.URL, partType str
 	cfg := buildRetrieveCfg(opts)
 	// "*" is the PS3.18 wildcard ("any transfer syntax"), not a UID.
 	if cfg.transferSyntax != "" && cfg.transferSyntax != "*" {
-		if err := c.core.CheckUID("transferSyntax", cfg.transferSyntax); err != nil {
+		if err := c.svc.Core().CheckUID("transferSyntax", cfg.transferSyntax); err != nil {
 			return nil, err
 		}
 	}

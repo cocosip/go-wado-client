@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cocosip/go-wado-client"
+	"github.com/cocosip/go-wado-client/internal/queryx"
 )
 
 // RenderedOption customizes rendered retrieval.
@@ -156,9 +157,7 @@ func (cfg renderedCfg) query(legacy bool) url.Values {
 
 // formatFloat renders a float without exponent notation — some servers fail
 // to parse values like "1e+07".
-func formatFloat(f float64) string {
-	return strconv.FormatFloat(f, 'f', -1, 64)
-}
+func formatFloat(f float64) string { return queryx.FormatFloat(f) }
 
 // iccProfileValues are the keyword values of the iccprofile parameter
 // (PS3.18 §8.3.5.1.5).
@@ -280,10 +279,10 @@ func (c *Client) prepareRendered(ctx context.Context, u *url.URL, opts []Rendere
 	// §8.3.5.1.5 fixes the keyword values; legacy mode (WithLegacyParamNames)
 	// speaks a private dialect whose icccolorspace values are the gateway's
 	// own, so it passes through unvalidated.
-	if cfg.icc != "" && !c.core.LegacyParams() && !iccProfileValues[cfg.icc] {
+	if cfg.icc != "" && !c.svc.Core().LegacyParams() && !iccProfileValues[cfg.icc] {
 		return nil, &wado.RequestError{Field: "iccprofile", Reason: fmt.Sprintf("unknown value %q", cfg.icc)}
 	}
-	u.RawQuery = cfg.query(c.core.LegacyParams()).Encode()
+	u.RawQuery = cfg.query(c.svc.Core().LegacyParams()).Encode()
 
 	return c.do(ctx, u, func(req *http.Request) { req.Header.Set("Accept", format) })
 }

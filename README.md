@@ -2,16 +2,26 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cocosip/go-wado-client.svg)](https://pkg.go.dev/github.com/cocosip/go-wado-client)
 
-A DICOM WADO client library for Go, implementing both retrieval standards of
-DICOM PS3.18 (Web Services):
+A DICOMweb client library for Go, implementing the DICOM PS3.18 (Web
+Services) transactions:
 
 - **WADO-RS** (`wadors`) — the Retrieve transaction of the Studies Service:
   Study/Series/Instance retrieval (streaming `multipart/related`), metadata
   (`application/dicom+json`), frame pixel data, rendered images and Bulk
   Data.
+- **QIDO-RS** (`qido`) — the Search transaction of the Studies Service:
+  attribute-based search over studies/series/instances returning
+  `application/dicom+json` datasets, with client-driven limit/offset paging
+  and the Warning 299 additional-results signal.
 - **WADO-URI** (`wadouri`) — the classic URI Service: a single GET
   identified entirely by query parameters, returning a DICOM file or a
   rendered image.
+- **Capabilities discovery** (`wado.Service.Capabilities` and a
+  `Capabilities` method on both REST clients) — the OPTIONS-based Retrieve
+  Capabilities transaction (PS3.18 §8.9): the `Allow` header method list
+  every HTTP origin server answers, plus the WADL Capabilities Description
+  (§8.9.4: `application/vnd.sun.wadl+xml` and its JSON representation) parsed
+  into a uniform model.
 
 DICOM processing (parsing, dicom+json, pixel codecs) is delegated to
 [cocosip/go-dicom](https://github.com/cocosip/go-dicom) and
@@ -109,6 +119,63 @@ imageQuality, rows/columns, region, annotation) combined with
 `application/dicom`, the DICOM-only `anonymize` switch combined with a
 rendered content type, invalid media types, and UID whitelist violations.
 
+## QIDO-RS (search)
+
+```go
+c, err := qido.New("https://gw.example.com/api/wado/H0001/RIS")
+if err != nil { log.Fatal(err) }
+
+// One page per call; paging is client-driven per the standard (limit/offset).
+limit := uint64(25)
+res, err := c.SearchStudies(ctx, qido.Query{
+    Match: []qido.Match{
+        {Attribute: "PatientID", Value: "11235813"},
+        {Attribute: "StudyDate", Value: "20240101-20241231"}, // C-FIND range
+        {Attribute: "SeriesInstanceUID", Values: []string{"1.2.3", "1.2.4"}}, // UID list
+    },
+    IncludeFields: []string{"00081048", "00081060"},
+    FuzzyMatching: qido.Bool(false),
+    Limit:         &limit,
+    // OrderBy:       []string{"-StudyDate"},  // ecosystem extension (dcm4chee)
+    // AETitle:       []string{"AE1"},
+})
+if err != nil { log.Fatal(err) }
+for _, ds := range res.Datasets {
+    uid, _ := ds.GetString(tag.StudyInstanceUID)
+}
+additional, more := res.AdditionalResults() // Warning 299: N results remain
+```
+
+Match attribute IDs accept tags (`0020000D`), keywords (`StudyInstanceUID`)
+and dotted sequence paths (`00101002.00100020`); match values follow the
+C-FIND matching rules (wildcards `*`/`?`, open-ended date/time ranges).
+`204 No Content` is a success: an empty, non-nil `Datasets` slice. Large
+result sets stream dataset by dataset via the `*Stream` variants
+(`SearchStudiesStream`, ...), and every standard resource has a method:
+`SearchStudies`, `SearchSeries`, `SearchStudyInstances`,
+`SearchSeriesInstances` and the relational `SearchAllSeries` /
+`SearchAllInstances` (optional server-side).
+
+## Capabilities discovery (HTTP OPTIONS)
+
+```go
+caps, err := c.Capabilities(ctx) // c = *wadors.Client or *qido.Client
+if err != nil {
+    if wado.IsCapabilitiesUnsupported(err) { /* 405/501: legacy gateway */ }
+    log.Fatal(err)
+}
+fmt.Println(caps.Allow)              // e.g. [GET HEAD OPTIONS] (RFC 9110)
+fmt.Println(caps.WADLSupports("/studies", "GET")) // WADL payload, if returned
+```
+
+`OPTIONS` targets the service base URL (or a sub-resource via
+`wado.WithCapsResource("studies")`). The reply always carries the parsed
+`Allow` header; when the server implements the PS3.18 §8.9 transaction, the
+WADL Capabilities Description is parsed from either standard representation
+(`application/vnd.sun.wadl+xml` or `application/json`) into
+`caps.WADL` — resource paths, methods and response media types. Unrelated
+payloads are passed through verbatim in `caps.Raw`.
+
 ## Multiple hospitals / tenants
 
 `Client` instances are cheap configuration holders sharing one connection
@@ -125,8 +192,9 @@ reg, err := multi.NewRegistry(
     multi.Template(
         "https://gw.example.com",
         multi.Routes{
-            RS:  "/api/wado/{hospital}/{biz}/wado-rs",
-            URI: "/api/wado/{hospital}/{biz}/wado-uri",
+            RS:   "/api/wado/{hospital}/{biz}/wado-rs",
+            URI:  "/api/wado/{hospital}/{biz}/wado-uri",
+            QIDO: "/api/wado/{hospital}/{biz}/wado-rs", // usually the RS route
         },
         func(k routeKey) map[string]string {
             return map[string]string{"hospital": k.Hospital, "biz": k.Biz}
@@ -137,8 +205,9 @@ reg, err := multi.NewRegistry(
 if err != nil { log.Fatal(err) }
 
 g, err := reg.Client(ctx, routeKey{Hospital: "H0001", Biz: "RIS"})
-// g.RS  -> https://gw.example.com/api/wado/H0001/RIS/wado-rs/studies/{study}/...
-// g.URI -> https://gw.example.com/api/wado/H0001/RIS/wado-uri?requestType=WADO&...
+// g.RS   -> https://gw.example.com/api/wado/H0001/RIS/wado-rs/studies/{study}/...
+// g.URI  -> https://gw.example.com/api/wado/H0001/RIS/wado-uri?requestType=WADO&...
+// g.Qido -> https://gw.example.com/api/wado/H0001/RIS/wado-rs/studies?... (set QidoRoute; usually the RS route)
 ```
 
 ## Parsing retrieved DICOM files
@@ -158,7 +227,7 @@ for res, err := range dicomx.Datasets(mp) {
 
 ## Configuration reference
 
-Shared options (`wado.Option`, apply to both clients and the registry):
+Shared options (`wado.Option`, apply to every client and the registry):
 `WithBasicAuth`, `WithBearerTokenSource`, `WithRequestEditor`,
 `WithHTTPClient`, `WithTLSClientConfig`, `WithRetry`, `WithUserAgent`,
 `WithLogger(*slog.Logger)`, `WithLogHandler(slog.Handler)`,
@@ -198,6 +267,10 @@ go run ./examples/wadors -base https://gw.example.com/api/wado/H0001/wado-rs -st
 # WADO-URI: both transactions with the full Request parameter set
 go run ./examples/wadouri -endpoint https://gw.example.com/api/wado/H0001/wado-uri \
     -study <studyUID> -series <seriesUID> -object <sopUID>
+
+# QIDO-RS: attribute search with paging + OPTIONS capabilities discovery
+go run ./examples/qido -base https://gw.example.com/api/wado/H0001/wado-rs \
+    -patient 11235813 -limit 25
 
 # multi registry wired to the hospital route template
 #   api/wado/{hospitalCode}/wado-rs + api/wado/{hospitalCode}/wado-uri

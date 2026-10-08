@@ -27,7 +27,7 @@ import (
 // StudyMetadata and friends already carry absolute URLs, so passing them
 // through directly is the intended usage.
 func (c *Client) FetchBulkData(ctx context.Context, uri string, opts ...RetrieveOption) (io.ReadCloser, error) {
-	u, err := wado.ResolveReference(c.base, uri)
+	u, err := wado.ResolveReference(c.svc.URL(), uri)
 	if err != nil {
 		return nil, err
 	}

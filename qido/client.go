@@ -1,24 +1,22 @@
-// Package wadors implements the WADO-RS client (the Retrieve transaction of
-// the Studies Service, PS3.18 §10.4): Study/Series/Instance retrieval
-// (streaming multipart/related), metadata (dicom+json, parsed by go-dicom's
-// serialization), frame pixel data, rendered images and Bulk Data.
+// Package qido implements the QIDO-RS client (the Search transaction of the
+// Studies Service, PS3.18 §10.6): attribute-based search over studies,
+// series and instances returning application/dicom+json datasets, with
+// client-driven limit/offset paging (§8.3.4) and the Warning 299
+// additional-results signal.
 //
 // The BaseURL is bound at construction (immutable, safe for concurrent use):
 // it is everything before the standard resource path (studies/...) and its
 // internal structure is opaque to the library. See Fork for multi-target
 // reuse.
-package wadors
+package qido
 
 import (
-	"context"
 	"errors"
-	"net/http"
-	"net/url"
 
 	"github.com/cocosip/go-wado-client"
 )
 
-// Client is a WADO-RS client bound to a single service base URL.
+// Client is a QIDO-RS client bound to a single service base URL.
 type Client struct {
 	svc *wado.Service
 }
@@ -45,7 +43,7 @@ func New(baseURL string, opts ...wado.Option) (*Client, error) {
 // connection pool).
 func NewWithCore(core *wado.Core, baseURL string) (*Client, error) {
 	if core == nil {
-		return nil, errors.New("wadors: nil core")
+		return nil, errors.New("qido: nil core")
 	}
 	svc, err := wado.NewService(core, baseURL)
 	if err != nil {
@@ -66,16 +64,6 @@ func (c *Client) Fork(baseURL string, opts ...wado.Option) (*Client, error) {
 
 // BaseURL returns the current base URL.
 func (c *Client) BaseURL() string { return c.svc.BaseURL() }
-
-// resourceURL appends the standard resource path segments to the base URL.
-func (c *Client) resourceURL(elems ...string) *url.URL {
-	return c.svc.ResourceURL(elems...)
-}
-
-// do sends a GET and checks the status (see wado.Service.Do).
-func (c *Client) do(ctx context.Context, u *url.URL, setHeader func(*http.Request)) (*http.Response, error) {
-	return c.svc.Do(ctx, http.MethodGet, u, setHeader)
-}
 
 // checkUIDs validates (field, uid) pairs.
 func (c *Client) checkUIDs(pairs ...string) error {

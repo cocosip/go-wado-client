@@ -14,7 +14,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/cocosip/go-wado-client"
@@ -23,23 +22,25 @@ import (
 // Client is a WADO-URI client bound to a single endpoint (immutable, safe
 // for concurrent use).
 type Client struct {
-	core *wado.Core
-	ep   *url.URL
+	svc *wado.Service
 }
 
 // New creates a client; endpoint is the full WADO-URI service URL. Any query
 // or fragment component of the endpoint is discarded during normalization —
 // fixed private parameters belong in Request.Extra instead.
 func New(endpoint string, opts ...wado.Option) (*Client, error) {
-	u, err := wado.ParseBaseURL(endpoint)
-	if err != nil {
+	if _, err := wado.ParseBaseURL(endpoint); err != nil {
 		return nil, err
 	}
 	core, err := wado.NewCore(opts...)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{core: core, ep: u}, nil
+	svc, err := wado.NewService(core, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{svc: svc}, nil
 }
 
 // NewWithCore creates a client on top of an existing shared core (assembly
@@ -48,29 +49,25 @@ func NewWithCore(core *wado.Core, endpoint string) (*Client, error) {
 	if core == nil {
 		return nil, errors.New("wadouri: nil core")
 	}
-	u, err := wado.ParseBaseURL(endpoint)
+	svc, err := wado.NewService(core, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	return &Client{core: core, ep: u}, nil
+	return &Client{svc: svc}, nil
 }
 
 // Fork derives a new client that shares the full assembly and only replaces
 // the endpoint (no network activity).
 func (c *Client) Fork(endpoint string, opts ...wado.Option) (*Client, error) {
-	u, err := wado.ParseBaseURL(endpoint)
+	svc, err := c.svc.Fork(endpoint, opts...)
 	if err != nil {
 		return nil, err
 	}
-	core, err := c.core.Fork(opts...)
-	if err != nil {
-		return nil, err
-	}
-	return &Client{core: core, ep: u}, nil
+	return &Client{svc: svc}, nil
 }
 
 // Endpoint returns the current endpoint URL.
-func (c *Client) Endpoint() string { return c.ep.String() }
+func (c *Client) Endpoint() string { return c.svc.BaseURL() }
 
 // Response is a WADO-URI response: always a single-part stream (a DICOM
 // file or a rendered image).
@@ -105,26 +102,20 @@ func (r *Response) Close() error {
 // Instance transaction); a rendered media type such as image/jpeg selects
 // the Retrieve Rendered Instance transaction.
 func (c *Client) Retrieve(ctx context.Context, req Request) (*Response, error) {
-	if err := req.validate(c.core.CheckUID); err != nil {
+	if err := req.validate(c.svc.Core().CheckUID); err != nil {
 		return nil, err
 	}
-	u := *c.ep
-	u.RawQuery = req.query(c.core.LegacyParams()).Encode()
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
+	u := *c.svc.URL()
+	u.RawQuery = req.query(c.svc.Core().LegacyParams()).Encode()
 	accept := strings.TrimSpace(req.ContentType)
 	if accept == "" {
 		accept = "application/dicom"
 	}
-	hreq.Header.Set("Accept", accept)
-	resp, err := c.core.Do(ctx, hreq)
+	resp, err := c.svc.Do(ctx, http.MethodGet, &u, func(hreq *http.Request) {
+		hreq.Header.Set("Accept", accept)
+	})
 	if err != nil {
 		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, wado.NewStatusError(hreq, resp)
 	}
 	return &Response{
 		ContentType: resp.Header.Get("Content-Type"),

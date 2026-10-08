@@ -41,7 +41,7 @@ func (c *Client) buildFrameList(frames []int) (string, error) {
 		return "", err
 	}
 	if len(fl) > frameListWarnLimit {
-		c.core.Logger().Warn("wadors: very long frame list; gateways may answer 414 URL Too Long, consider batching",
+		c.svc.Core().Logger().Warn("wadors: very long frame list; gateways may answer 414 URL Too Long, consider batching",
 			"length", len(fl), "limit", frameListWarnLimit)
 	}
 	return fl, nil

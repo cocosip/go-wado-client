@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cocosip/go-wado-client"
+	"github.com/cocosip/go-wado-client/internal/queryx"
 )
 
 // Annotation kinds (values of the annotation parameter).
@@ -289,6 +290,6 @@ func (r Request) query(legacy bool) url.Values {
 	return q
 }
 
-func formatFloat(f float64) string {
-	return strconv.FormatFloat(f, 'f', -1, 64)
-}
+// formatFloat renders a float without exponent notation (see
+// queryx.FormatFloat).
+func formatFloat(f float64) string { return queryx.FormatFloat(f) }

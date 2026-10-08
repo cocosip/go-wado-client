@@ -1,6 +1,6 @@
 // Package multi provides a multi-target (multi-hospital/tenant/business
 // line) client registry: a generic business key → endpoint → cached client
-// pair (RS + URI).
+// group (RS + URI + Qido).
 //
 // An Endpoint keeps responsibilities strictly separated: one standard base
 // address (scheme://host with an optional static prefix, carrying no
@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/cocosip/go-wado-client"
+	"github.com/cocosip/go-wado-client/qido"
 	"github.com/cocosip/go-wado-client/wadors"
 	"github.com/cocosip/go-wado-client/wadouri"
 )
@@ -46,16 +47,22 @@ type Endpoint struct {
 	// e.g. "/api/wado/H0001/RIS/wado-uri". Empty means the target offers
 	// no WADO-URI service and Gateway.URI will be nil.
 	URIRoute string
+	// QidoRoute is the QIDO-RS route as an absolute path joined onto Base.
+	// QIDO-RS is usually served under the same route prefix as WADO-RS —
+	// give both routes the same value then. Empty means the target offers
+	// no QIDO-RS service and Gateway.Qido will be nil.
+	QidoRoute string
 	// Options are target-specific settings (auth/timeouts etc.) layered on
 	// top of the registry defaults.
 	Options []wado.Option
 }
 
-// Gateway is the client pair of one target; a field is nil when the
+// Gateway is the client group of one target; a field is nil when the
 // corresponding Endpoint route is empty.
 type Gateway struct {
-	RS  *wadors.Client
-	URI *wadouri.Client
+	RS   *wadors.Client
+	URI  *wadouri.Client
+	Qido *qido.Client
 }
 
 // Resolver maps a business key to an endpoint.
@@ -93,8 +100,9 @@ var placeholderRe = regexp.MustCompile(`\{[A-Za-z0-9_]+\}`)
 // Placeholders ({name}) are filled per key; an empty route means the
 // gateway does not offer that service.
 type Routes struct {
-	RS  string // WADO-RS route template, e.g. "/api/wado/{hospitalCode}/{businessCode}/wado-rs"
-	URI string // WADO-URI route template, e.g. "/api/wado/{hospitalCode}/{businessCode}/wado-uri"
+	RS   string // WADO-RS route template, e.g. "/api/wado/{hospitalCode}/{businessCode}/wado-rs"
+	URI  string // WADO-URI route template, e.g. "/api/wado/{hospitalCode}/{businessCode}/wado-uri"
+	QIDO string // QIDO-RS route template; usually the same value as RS
 }
 
 // Template returns a Resolver that fills the placeholders of both route
@@ -119,7 +127,11 @@ func Template[K comparable](base string, routes Routes, vars func(K) map[string]
 		if err != nil {
 			return Endpoint{}, fmt.Errorf("multi: URI route: %w", err)
 		}
-		return Endpoint{Base: base, RSRoute: rs, URIRoute: uri}, nil
+		qido, err := fillRoute(rep, routes.QIDO)
+		if err != nil {
+			return Endpoint{}, fmt.Errorf("multi: QIDO route: %w", err)
+		}
+		return Endpoint{Base: base, RSRoute: rs, URIRoute: uri, QidoRoute: qido}, nil
 	}
 }
 
@@ -181,8 +193,8 @@ func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ep.RSRoute == "" && ep.URIRoute == "" {
-		return nil, fmt.Errorf("multi: endpoint for key %v sets neither RSRoute nor URIRoute", key)
+	if ep.RSRoute == "" && ep.URIRoute == "" && ep.QidoRoute == "" {
+		return nil, fmt.Errorf("multi: endpoint for key %v sets neither RSRoute nor URIRoute nor QidoRoute", key)
 	}
 	core, err := r.base.Fork(ep.Options...)
 	if err != nil {
@@ -204,6 +216,15 @@ func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 			return nil, err
 		}
 		if g.URI, err = wadouri.NewWithCore(core, full); err != nil {
+			return nil, err
+		}
+	}
+	if ep.QidoRoute != "" {
+		full, err := joinRoute(ep.Base, ep.QidoRoute)
+		if err != nil {
+			return nil, err
+		}
+		if g.Qido, err = qido.NewWithCore(core, full); err != nil {
 			return nil, err
 		}
 	}
