@@ -18,15 +18,12 @@ const frameListWarnLimit = 2048
 // RetrieveFrames retrieves the given frames (multipart/related,
 // type=application/octet-stream). Frames are 1-based; the list is sorted and
 // de-duplicated automatically to satisfy the standard's ascending-order
-// requirement.
+// requirement (PS3.18 §10.1.1: {frames} is "a comma-separated list of Frame
+// numbers, in ascending order").
 func (c *Client) RetrieveFrames(ctx context.Context, studyUID, seriesUID, sopUID string, frames []int, opts ...RetrieveOption) (*Multipart, error) {
-	fl, err := framesList(frames)
+	fl, err := c.buildFrameList(frames)
 	if err != nil {
 		return nil, err
-	}
-	if len(fl) > frameListWarnLimit {
-		c.core.Logger().Warn("wadors: very long frame list; gateways may answer 414 URL Too Long, consider batching",
-			"length", len(fl), "limit", frameListWarnLimit)
 	}
 	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID, "sopInstanceUID", sopUID); err != nil {
 		return nil, err
@@ -34,6 +31,20 @@ func (c *Client) RetrieveFrames(ctx context.Context, studyUID, seriesUID, sopUID
 	return c.retrieveMultipart(ctx,
 		c.resourceURL("studies", studyUID, "series", seriesUID, "instances", sopUID, "frames", fl),
 		"application/octet-stream", opts)
+}
+
+// buildFrameList renders the wire form of a frame list and warns when it
+// grows towards the URL-length limits of typical gateways.
+func (c *Client) buildFrameList(frames []int) (string, error) {
+	fl, err := framesList(frames)
+	if err != nil {
+		return "", err
+	}
+	if len(fl) > frameListWarnLimit {
+		c.core.Logger().Warn("wadors: very long frame list; gateways may answer 414 URL Too Long, consider batching",
+			"length", len(fl), "limit", frameListWarnLimit)
+	}
+	return fl, nil
 }
 
 // framesList validates, sorts and de-duplicates frame numbers and renders

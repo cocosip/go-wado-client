@@ -161,6 +161,10 @@ func (m *Multipart) WriteToDir(dir string) ([]string, error) {
 	return files, nil
 }
 
+// Header returns the header of the underlying HTTP response (warning
+// headers etc.).
+func (m *Multipart) Header() http.Header { return m.resp.Header }
+
 // Close closes the underlying response.
 func (m *Multipart) Close() error { return m.resp.Body.Close() }
 

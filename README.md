@@ -74,6 +74,9 @@ sop, _ := dss[0].GetString(tag.SOPInstanceUID)
 frames, _ := c.RetrieveFrames(ctx, study, series, sop, []int{1, 3, 5})
 img, _ := c.RetrieveRenderedInstance(ctx, study, series, sop,
     wadors.WithRenderedFormat("image/png"), wadors.WithWindow(40, 400))
+rimgs, _ := c.RetrieveRenderedFrames(ctx, study, series, sop, []int{1, 2})
+// rimgs is a cursor over every image — a conformant server may answer
+// multipart/related with one image part per frame (PS3.18 §10.4.4).
 bulk, _ := c.FetchBulkData(ctx, uriFromMetadata)
 ```
 
@@ -100,11 +103,11 @@ if resp.IsDICOM() { io.Copy(f, resp.Body) }
 
 Local validation rejects up front everything the standard says a server must
 answer with 400: the window pair / presentation pair and their mutual
-exclusions (including `region` vs. presentation state), the rendered-only
-parameters (frameNumber, imageQuality, rows/columns, region, annotation)
-combined with `application/dicom`, the DICOM-only `anonymize` switch combined
-with a rendered content type, invalid media types, and UID whitelist
-violations.
+exclusions, `frameNumber` combined with a presentation state, `rows` /
+`columns` only as a pair, the rendered-only parameters (frameNumber,
+imageQuality, rows/columns, region, annotation) combined with
+`application/dicom`, the DICOM-only `anonymize` switch combined with a
+rendered content type, invalid media types, and UID whitelist violations.
 
 ## Multiple hospitals / tenants
 

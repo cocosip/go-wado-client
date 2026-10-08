@@ -11,8 +11,9 @@ type retrieveCfg struct {
 }
 
 // WithTransferSyntax negotiates transcoding in the Accept header, e.g.
-// "1.2.840.10008.1.2.1" (Explicit VR Little Endian). PS3.18 also defines the
-// wildcard "*" ("any transfer syntax the server supports").
+// "1.2.840.10008.1.2.1" (Explicit VR Little Endian). PS3.18 §8.7.3.5.2
+// allows a single value per media type and also defines the wildcard "*"
+// ("any transfer syntax the server supports").
 //
 // The parameter applies to the multipart retrieves (study / series /
 // instance / frames); metadata responses are always dicom+json and never

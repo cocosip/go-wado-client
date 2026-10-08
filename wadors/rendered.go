@@ -25,6 +25,7 @@ const (
 
 type renderedCfg struct {
 	format      string
+	accept      string
 	quality     int
 	viewport    [2]int
 	window      [2]float64
@@ -39,6 +40,13 @@ type renderedCfg struct {
 // application/dicom is not allowed).
 func WithRenderedFormat(m string) RenderedOption {
 	return func(c *renderedCfg) { c.format = m }
+}
+
+// WithRenderedAccept overrides the Accept header entirely (advanced escape
+// hatch) — e.g. `multipart/related; type="image/jpeg"` to negotiate the
+// multipart reply form of a rendered response explicitly.
+func WithRenderedAccept(h string) RenderedOption {
+	return func(c *renderedCfg) { c.accept = h }
 }
 
 // WithViewport sets the viewport (columns, rows).
@@ -152,8 +160,22 @@ func formatFloat(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
+// iccProfileValues are the keyword values of the iccprofile parameter
+// (PS3.18 §8.3.5.1.5).
+var iccProfileValues = map[string]bool{
+	"no": true, "yes": true, "srgb": true,
+	"adobergb": true, "rommrgb": true, "displayp3": true,
+}
+
 // Rendered is a rendered response (a single-part image stream such as
 // image/png).
+//
+// It represents exactly one image: when the server answers a rendered
+// request with multipart/related, only the first part is delivered. That is
+// always correct for a single-frame target, but a multi-image response
+// (PS3.18 §10.4.3.3.3: one rendering per valid instance — e.g. a
+// Presentation State target referencing many frames, §8.3.5.1.6) needs
+// RetrieveRenderedFrames-style iteration instead.
 type Rendered struct {
 	ContentType string
 	Body        io.Reader
@@ -177,55 +199,14 @@ func (c *Client) RetrieveRenderedInstance(ctx context.Context, studyUID, seriesU
 	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID, "sopInstanceUID", sopUID); err != nil {
 		return nil, err
 	}
-	return c.retrieveRendered(ctx,
+	resp, err := c.prepareRendered(ctx,
 		c.resourceURL("studies", studyUID, "series", seriesUID, "instances", sopUID, "rendered"), opts)
-}
-
-// RetrieveRenderedFrames retrieves the rendered image of the given frames
-// (1-based, sorted and de-duplicated automatically).
-func (c *Client) RetrieveRenderedFrames(ctx context.Context, studyUID, seriesUID, sopUID string, frames []int, opts ...RenderedOption) (*Rendered, error) {
-	fl, err := framesList(frames)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID, "sopInstanceUID", sopUID); err != nil {
-		return nil, err
-	}
-	return c.retrieveRendered(ctx,
-		c.resourceURL("studies", studyUID, "series", seriesUID, "instances", sopUID, "frames", fl, "rendered"), opts)
-}
-
-func (c *Client) retrieveRendered(ctx context.Context, u *url.URL, opts []RenderedOption) (*Rendered, error) {
-	cfg := buildRenderedCfg(opts)
-	format := cfg.format
-	if format == "" {
-		format = "image/jpeg"
-	}
-	if format == "application/dicom" {
-		return nil, &wado.RequestError{Field: "format", Reason: "rendered media type must not be application/dicom"}
-	}
-	for _, a := range cfg.annotations {
-		if a != "patient" && a != "technique" {
-			return nil, &wado.RequestError{Field: "annotation", Reason: fmt.Sprintf("unknown kind %q", a)}
-		}
-	}
-	switch cfg.voiFunction {
-	case "", WindowFunctionLinear, WindowFunctionLinearExact, WindowFunctionSigmoid:
-	default:
-		return nil, &wado.RequestError{Field: "windowFunction", Reason: fmt.Sprintf("unknown function %q", cfg.voiFunction)}
-	}
-	if cfg.quality != 0 && (cfg.quality < 1 || cfg.quality > 100) {
-		return nil, &wado.RequestError{Field: "quality", Reason: "must be within 1..100"}
-	}
-	u.RawQuery = cfg.query(c.core.LegacyParams()).Encode()
-
-	resp, err := c.do(ctx, u, func(req *http.Request) { req.Header.Set("Accept", format) })
 	if err != nil {
 		return nil, err
 	}
 	ct := resp.Header.Get("Content-Type")
-	// Tolerance: a few servers wrap rendered images in multipart; take the
-	// first part.
+	// Tolerance: some servers wrap rendered images in multipart; take the
+	// first part (see the Rendered doc for the multi-image caveat).
 	if strings.HasPrefix(ct, "multipart/") {
 		mp, err := newMultipart(resp)
 		if err != nil {
@@ -242,4 +223,67 @@ func (c *Client) retrieveRendered(ctx context.Context, u *url.URL, opts []Render
 		return &Rendered{ContentType: ct, Body: p, Header: resp.Header.Clone(), resp: resp}, nil
 	}
 	return &Rendered{ContentType: ct, Body: resp.Body, Header: resp.Header.Clone(), resp: resp}, nil
+}
+
+// RetrieveRenderedFrames retrieves rendered images of the given frames
+// (1-based, sorted and de-duplicated automatically).
+//
+// The returned cursor covers both reply forms a conformant origin server may
+// choose (PS3.18 §10.4.4): a single-part image, or multipart/related with
+// one image part per frame (the payload "shall contain a rendering of all
+// valid Instances", §10.4.3.3.3) — every image is delivered, none silently
+// dropped. Use WithRenderedAccept to negotiate the multipart form
+// explicitly.
+func (c *Client) RetrieveRenderedFrames(ctx context.Context, studyUID, seriesUID, sopUID string, frames []int, opts ...RenderedOption) (*Multipart, error) {
+	fl, err := c.buildFrameList(frames)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.checkUIDs("studyUID", studyUID, "seriesUID", seriesUID, "sopInstanceUID", sopUID); err != nil {
+		return nil, err
+	}
+	resp, err := c.prepareRendered(ctx,
+		c.resourceURL("studies", studyUID, "series", seriesUID, "instances", sopUID, "frames", fl, "rendered"), opts)
+	if err != nil {
+		return nil, err
+	}
+	return newMultipart(resp)
+}
+
+// prepareRendered validates the rendered options, builds the query string
+// and performs the GET.
+func (c *Client) prepareRendered(ctx context.Context, u *url.URL, opts []RenderedOption) (*http.Response, error) {
+	cfg := buildRenderedCfg(opts)
+	format := cfg.accept
+	if format == "" {
+		format = cfg.format
+	}
+	if format == "" {
+		format = "image/jpeg"
+	}
+	if cfg.format == "application/dicom" {
+		return nil, &wado.RequestError{Field: "format", Reason: "rendered media type must not be application/dicom"}
+	}
+	for _, a := range cfg.annotations {
+		if a != "patient" && a != "technique" {
+			return nil, &wado.RequestError{Field: "annotation", Reason: fmt.Sprintf("unknown kind %q", a)}
+		}
+	}
+	switch cfg.voiFunction {
+	case "", WindowFunctionLinear, WindowFunctionLinearExact, WindowFunctionSigmoid:
+	default:
+		return nil, &wado.RequestError{Field: "windowFunction", Reason: fmt.Sprintf("unknown function %q", cfg.voiFunction)}
+	}
+	if cfg.quality != 0 && (cfg.quality < 1 || cfg.quality > 100) {
+		return nil, &wado.RequestError{Field: "quality", Reason: "must be within 1..100"}
+	}
+	// §8.3.5.1.5 fixes the keyword values; legacy mode (WithLegacyParamNames)
+	// speaks a private dialect whose icccolorspace values are the gateway's
+	// own, so it passes through unvalidated.
+	if cfg.icc != "" && !c.core.LegacyParams() && !iccProfileValues[cfg.icc] {
+		return nil, &wado.RequestError{Field: "iccprofile", Reason: fmt.Sprintf("unknown value %q", cfg.icc)}
+	}
+	u.RawQuery = cfg.query(c.core.LegacyParams()).Encode()
+
+	return c.do(ctx, u, func(req *http.Request) { req.Header.Set("Accept", format) })
 }

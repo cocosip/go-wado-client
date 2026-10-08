@@ -50,7 +50,7 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 要点：
 
 - **`{study}`/`{series}`/`{instance}` 是 UID 原样出现在路径段中**；`{frames}` 为逗号分隔、升序帧号（1 起，现行文本不含区间语法）。
-- **媒体类型协商走 `Accept` 头**（双端必选支持）：实例检索 `multipart/related; type="application/dicom"`，可附加 `transfer-syntax=<UID>` 参数协商转码（`*` 为标准定义的通配符，表示"服务器任选支持的传输语法"；该参数仅适用于实例/帧检索，metadata 恒为 dicom+json 不携带）；元数据 `application/dicom+json`；帧/批量数据 `multipart/related; type="application/octet-stream"`。字符集协商用标准的 `charset` **查询参数**（PS3.18 §6.5 定义，2019a 起明确；`Accept-Charset` 头不是 WADO-RS 的标准机制，不发）。
+- **媒体类型协商走 `Accept` 头**（双端必选支持）：实例检索 `multipart/related; type="application/dicom"`，可附加 `transfer-syntax=<UID>` 参数协商转码（`*` 为标准定义的通配符，表示"服务器任选支持的传输语法"；该参数仅适用于实例/帧检索，metadata 恒为 dicom+json 不携带）；元数据 `application/dicom+json`；帧/批量数据 `multipart/related; type="application/octet-stream"`。字符集协商用标准的 `charset` **查询参数**（PS3.18 §8.3.3.2 定义；`Accept-Charset` 头不是 WADO-RS 的标准机制，不发）。
 - **渲染媒体类型**（§8.7.4）：单帧 image/jpeg（基准必须支持）/png/gif/jp2/jxl，多帧 gif/jxl，视频 video/mpeg、video/mp4、video/H265，文本 text/html、text/plain、application/pdf 等；渲染类型**不允许**带 transfer-syntax 参数。
 - **渲染查询参数**：标准命名为 `annotation`、`quality`、`viewport`（vw,vh 即 columns,rows）、`window=center,width,function`（**三值必填**，function 取 linear/linear-exact/sigmoid，缺省 linear）、`iccprofile`——rendered 事务自 2016d 入标起即用此命名；`annotations`/`windowcenter`/`windowwidth`/`icccolorspace` 是退役的 WADO-WS 时代方言（从未见于任何 WADO-RS 版本），仅在对接只认它的私有网关时经 `WithLegacyParamNames` 显式启用（见 §3 D6）。
 - **BulkDataURI 三种形式**（相对路径解析规则，见 §3 D9）：绝对 URI；带绝对路径的相对 URI（`/dicomweb/studies/...`）；带相对路径的相对 URI（`./bulkdata/...`，相对于**发起元数据请求的路径**）。
@@ -61,8 +61,8 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 
 - **单一 GET，标准不定义任何路径**——Target URI 就是服务的 Base URI（现网常见 `/wado`、`/wado-uri` 等，完全由部署方决定）。资源全部通过查询参数标识：
   - 必选：`requestType=WADO`、`studyUID`、`seriesUID`、`objectUID`。
-  - 可选（Retrieve DICOM Instance 事务，§9.4）：`contentType`（默认/缺省 `application/dicom`）、`charset`、`anonymize=yes`（经典名 `anonymity`；§8.1 规定仅可与 `application/dicom` 同用）、`transferSyntax=<UID>`（转码，服务器可选支持）。
-  - 可选（Retrieve Rendered Instance 事务，§9.5）：`contentType`（必须是渲染类型，填 `application/dicom` 会 406）、`annotation=patient,technique`（§8.2：`application/dicom` 时不得出现）、`frameNumber`、`imageQuality`、`rows`/`columns`（**各自独立可选**，§8.2.2：只给一个时服务器按保持纵横比推算另一个）、`region=xmin,ymin,xmax,ymax`（归一化坐标；§8.2.4：与 Presentation State 互斥）、`windowCenter`/`windowWidth`（成对，与 Presentation State 互斥）、`presentationUID`/`presentationSeriesUID`（成对）。
+  - 可选（Retrieve DICOM Instance 事务，§9.4）：`contentType`（默认/缺省 `application/dicom`）、`charset`、`anonymize=yes`（经典名 `anonymity`；§9.4.1.2.1 规定仅可与 `application/dicom` 同用）、`transferSyntax=<UID>`（转码，服务器可选支持）。
+  - 可选（Retrieve Rendered Instance 事务，§9.5）：`contentType`（必须是渲染类型，填 `application/dicom` 会 406）、`annotation=patient,technique`（§9.5.1.2.2：`application/dicom` 时不得出现）、`frameNumber`、`imageQuality`、`rows`/`columns`（**必须成对出现**，§9.5.1.2.4："If either parameter is present, both shall be present"）、`region=xmin,ymin,xmax,ymax`（归一化坐标，§9.5.1.2.5；§9.5.1.2.7：**允许**与 Presentation State 同用，此时其余可选参数仅限 annotation/imageQuality/region/rows/columns——即 `frameNumber` 不得与 Presentation State 同用）、`windowCenter`/`windowWidth`（成对，与 Presentation State 互斥）、`presentationUID`/`presentationSeriesUID`（成对）。
 - **响应恒为单段**（非 multipart）：一个 DICOM PS3.10 文件或一张渲染图。
 - 缺省 `contentType` 且 `Accept: */*` 时默认 `image/jpeg`。
 - 状态码：400（如 `requestType` 缺失或非 `WADO`）及 §8.5 公共码。
@@ -244,14 +244,14 @@ func (c *Client) InstanceMetadata(ctx context.Context, studyUID, seriesUID, sopU
 // —— 帧与渲染 ——
 func (c *Client) RetrieveFrames(ctx context.Context, studyUID, seriesUID, sopUID string, frames []int, opts ...RetrieveOption) (*Multipart, error)
 func (c *Client) RetrieveRenderedInstance(ctx context.Context, studyUID, seriesUID, sopUID string, opts ...RenderedOption) (*Rendered, error)
-func (c *Client) RetrieveRenderedFrames(ctx context.Context, studyUID, seriesUID, sopUID string, frames []int, opts ...RenderedOption) (*Rendered, error)
+func (c *Client) RetrieveRenderedFrames(ctx context.Context, studyUID, seriesUID, sopUID string, frames []int, opts ...RenderedOption) (*Multipart, error)
 
 // —— Bulk Data（uri 可为元数据里的 BulkDataURI，相对/绝对均可）——
 func (c *Client) FetchBulkData(ctx context.Context, uri string, opts ...RetrieveOption) (io.ReadCloser, error)
 ```
 
 `RetrieveOption`：`WithTransferSyntax(uid)`、`WithAccept(...)`、`WithCharset(cs)`。
-`RenderedOption`：`WithRenderedFormat("image/png")`、`WithViewport(w,h)`、`WithQuality(n)`、`WithWindow(c,w)`、`WithAnnotation(patient, technique bool)`、`WithICCProfile(...)`、`WithRawQuery(url.Values)`。
+`RenderedOption`：`WithRenderedFormat("image/png")`、`WithRenderedAccept(...)`、`WithViewport(w,h)`、`WithQuality(n)`、`WithWindow(c,w)`、`WithWindowFunction(fn)`、`WithAnnotation(kinds...)`、`WithICCProfile(id)`（值域限 §8.3.5.1.5 关键字，legacy 模式透传）、`WithRawQuery(url.Values)`。
 
 ### 5.2 multipart 游标（Go 1.23+ 迭代器风格）
 

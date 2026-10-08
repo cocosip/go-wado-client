@@ -23,10 +23,12 @@ type fakePart struct {
 
 // Test fixtures shared by the fake servers.
 const (
-	mediaTypeDICOM     = "application/dicom"
-	mediaTypeDICOMJSON = "application/dicom+json"
-	dicomData1         = "DICOMDATA1"
-	dicomData2         = "DICOMDATA2"
+	mediaTypeDICOM       = "application/dicom"
+	mediaTypeDICOMJSON   = "application/dicom+json"
+	mediaTypeOctetStream = "application/octet-stream"
+	mediaTypeJPEG        = "image/jpeg"
+	dicomData1           = "DICOMDATA1"
+	dicomData2           = "DICOMDATA2"
 )
 
 // multipartBody renders a complete multipart/related body with the fixed

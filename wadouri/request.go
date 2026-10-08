@@ -25,6 +25,8 @@ const (
 	reasonNeedsRendered = "requires a rendered contentType"
 	// fieldRegion is the error field name of the region parameter.
 	fieldRegion = "Region"
+	// fieldFrameNumber is the error field name of the frameNumber parameter.
+	fieldFrameNumber = "FrameNumber"
 )
 
 // Request holds the WADO-URI retrieval parameters.
@@ -41,19 +43,18 @@ type Request struct {
 	TransferSyntax string
 	Charset        string
 	// Anonymize is emitted as anonymize=yes (anonymity=yes with legacy
-	// naming). It is a DICOM-only parameter: PS3.18 §8.1 forbids it together
-	// with a rendered contentType.
+	// naming). It is a DICOM-only parameter: PS3.18 §9.4.1.2.1 forbids it
+	// together with a rendered contentType.
 	Anonymize  bool
-	Annotation []string // "patient" / "technique"; rendered-only (PS3.18 §8.2)
+	Annotation []string // "patient" / "technique"; rendered-only (PS3.18 §9.5.1.2.2)
 
-	// Rendered parameters below. Per PS3.18 §8.2 they apply to image
+	// Rendered parameters below. Per PS3.18 §9.5.1.2 they apply to image
 	// retrieval only, so they are rejected together with the
 	// application/dicom content type (the server would answer 400).
 	FrameNumber  int // 1-based; 0 = absent
 	ImageQuality int // 1..100; 0 = absent
-	// Rows/Columns cap the rendered image size; each is independently
-	// optional (PS3.18 §8.2.2: when only one is given, the server chooses
-	// the other to preserve the aspect ratio); 0 = absent.
+	// Rows/Columns cap the rendered image size; PS3.18 §9.5.1.2.4: "If
+	// either parameter is present, both shall be present"; 0 = absent.
 	Rows    int
 	Columns int
 	Region  *[4]float64 // xmin,ymin,xmax,ymax normalized to 0..1; nil = absent
@@ -130,8 +131,9 @@ func (r Request) validateUIDs(checkUID func(field, uid string) error) error {
 			return err
 		}
 	}
-	// transferSyntax is validated separately: besides UIDs, PS3.18 defines
-	// the wildcard "*" ("any transfer syntax the server supports").
+	// transferSyntax is validated separately: besides UIDs, PS3.18
+	// §8.7.3.5.2 defines the wildcard "*" ("any transfer syntax the server
+	// supports").
 	if r.TransferSyntax != "" && r.TransferSyntax != "*" {
 		if err := checkUID("transferSyntax", r.TransferSyntax); err != nil {
 			return err
@@ -162,11 +164,12 @@ func (r Request) validateWindowAndPresentation(isDICOM bool) error {
 }
 
 // validateRenderedValues checks the rendered-only parameters: their exclusion
-// from the DICOM instance transaction (PS3.18 §8.2: they apply to image
+// from the DICOM instance transaction (PS3.18 §9.5.1.2: they apply to image
 // retrieval only — a request carrying them for a non-image object is answered
-// 400), the anonymize direction (PS3.18 §8.1: DICOM responses only), the
-// region constraints (PS3.18 §8.2.4: normalized 0..1, forbidden together with
-// a Presentation Object), and the remaining value ranges.
+// 400), the anonymize direction (PS3.18 §9.4.1.2.1: DICOM responses only),
+// the region constraints (PS3.18 §9.5.1.2.5: normalized 0..1), the
+// presentation-state combination rules (PS3.18 §9.5.1.2.7), and the remaining
+// value ranges.
 func (r Request) validateRenderedValues(isDICOM bool) error {
 	if r.Anonymize && !isDICOM {
 		return &wado.RequestError{Field: "Anonymize", Reason: "requires the application/dicom contentType"}
@@ -174,7 +177,7 @@ func (r Request) validateRenderedValues(isDICOM bool) error {
 	if isDICOM {
 		switch {
 		case r.FrameNumber != 0:
-			return &wado.RequestError{Field: "FrameNumber", Reason: reasonNeedsRendered}
+			return &wado.RequestError{Field: fieldFrameNumber, Reason: reasonNeedsRendered}
 		case r.ImageQuality != 0:
 			return &wado.RequestError{Field: "ImageQuality", Reason: reasonNeedsRendered}
 		case r.Rows != 0 || r.Columns != 0:
@@ -182,16 +185,23 @@ func (r Request) validateRenderedValues(isDICOM bool) error {
 		case r.Region != nil:
 			return &wado.RequestError{Field: fieldRegion, Reason: reasonNeedsRendered}
 		case len(r.Annotation) > 0:
-			// PS3.18 §8.2: "It shall not be present if contentType is
+			// PS3.18 §9.5.1.2.2: "It shall not be present if contentType is
 			// application/dicom".
 			return &wado.RequestError{Field: "Annotation", Reason: reasonNeedsRendered}
 		}
 	}
+	// PS3.18 §9.5.1.2.4: "If either parameter is present, both shall be
+	// present."
+	if (r.Rows != 0) != (r.Columns != 0) {
+		return &wado.RequestError{Field: "Rows/Columns", Reason: reasonSetTogether}
+	}
 	hasPres := r.PresentationUID != "" || r.PresentationSeriesUID != ""
-	if r.Region != nil && hasPres {
-		// PS3.18 §8.2.4: region "shall not be present if the Unique
-		// Identifier of the Presentation Object parameter is present".
-		return &wado.RequestError{Field: fieldRegion, Reason: "region and presentation state are mutually exclusive"}
+	// PS3.18 §9.5.1.2.7: with a Presentation State the only other optional
+	// parameters that may be present are annotation, imageQuality, region
+	// and rows/columns — not frameNumber (windowing is already excluded by
+	// validateWindowAndPresentation).
+	if hasPres && r.FrameNumber != 0 {
+		return &wado.RequestError{Field: fieldFrameNumber, Reason: "must not be combined with a presentation state"}
 	}
 	if r.Region != nil {
 		x1, y1, x2, y2 := r.Region[0], r.Region[1], r.Region[2], r.Region[3]
@@ -200,7 +210,7 @@ func (r Request) validateRenderedValues(isDICOM bool) error {
 		}
 	}
 	if r.FrameNumber < 0 {
-		return &wado.RequestError{Field: "FrameNumber", Reason: "must be >= 1"}
+		return &wado.RequestError{Field: fieldFrameNumber, Reason: "must be >= 1"}
 	}
 	if r.ImageQuality != 0 && (r.ImageQuality < 1 || r.ImageQuality > 100) {
 		return &wado.RequestError{Field: "ImageQuality", Reason: "must be within 1..100"}
@@ -254,7 +264,10 @@ func (r Request) query(legacy bool) url.Values {
 		q.Set("columns", strconv.Itoa(r.Columns))
 	}
 	if r.Region != nil {
-		q.Set("region", fmt.Sprintf("%g,%g,%g,%g", r.Region[0], r.Region[1], r.Region[2], r.Region[3]))
+		q.Set("region", strings.Join([]string{
+			formatFloat(r.Region[0]), formatFloat(r.Region[1]),
+			formatFloat(r.Region[2]), formatFloat(r.Region[3]),
+		}, ","))
 	}
 	if r.WindowCenter != nil {
 		q.Set("windowCenter", formatFloat(*r.WindowCenter))

@@ -15,7 +15,7 @@ func TestFetchBulkData(t *testing.T) {
 	var path string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path = r.URL.Path
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", mediaTypeOctetStream)
 		_, _ = w.Write([]byte(bulkBody))
 	}))
 	defer srv.Close()
@@ -63,13 +63,46 @@ func TestFetchBulkData(t *testing.T) {
 	}
 }
 
-// TestFetchBulkDataMultipartTolerance covers servers that answer with
-// multipart despite the single-part expectation.
+// TestFetchBulkDataDefaultAccept pins the PS3.18 §10.4.4 media-type choice:
+// the default requests the multipart/related form origin servers must
+// support; the optional single-part form stays reachable via WithAccept.
+func TestFetchBulkDataDefaultAccept(t *testing.T) {
+	var gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", mediaTypeOctetStream)
+		_, _ = w.Write([]byte(bulkBody))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/api/x")
+	rc, err := c.FetchBulkData(context.Background(), "/bulk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rc.Close() }()
+	if gotAccept != `multipart/related; type="application/octet-stream"` {
+		t.Errorf("default Accept = %q", gotAccept)
+	}
+
+	rc, err = c.FetchBulkData(context.Background(), "/bulk", WithAccept(mediaTypeOctetStream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rc.Close() }()
+	if gotAccept != mediaTypeOctetStream {
+		t.Errorf("overridden Accept = %q", gotAccept)
+	}
+}
+
+// TestFetchBulkDataMultipartTolerance covers servers that answer a multipart
+// request with the optional single-part form and vice versa: both reply
+// shapes reduce to the one element the URI identifies.
 func TestFetchBulkDataMultipartTolerance(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="application/octet-stream"`)
 		_, _ = w.Write(multipartBody([]fakePart{
-			{ct: "application/octet-stream", body: bulkBody},
+			{ct: mediaTypeOctetStream, body: bulkBody},
 		}))
 	}))
 	defer srv.Close()

@@ -264,7 +264,7 @@ func runRendered(ctx context.Context, c, ic *wadors.Client, opts []wado.Option, 
 		wadors.WithViewport(512, 512),
 		wadors.WithQuality(90),
 		wadors.WithAnnotation("patient", "technique"),
-		wadors.WithICCProfile("sRGB"),
+		wadors.WithICCProfile("srgb"),
 	)
 	if err != nil {
 		return fmt.Errorf("rendered instance: %w", err)
@@ -277,19 +277,26 @@ func runRendered(ctx context.Context, c, ic *wadors.Client, opts []wado.Option, 
 	fmt.Printf("rendered instance: %s (response %s) → %s\n",
 		img.ContentType, img.Header.Get("Content-Type"), name)
 
-	rimg, err := ic.RetrieveRenderedFrames(ctx, studyUID, seriesUID, sopUID, []int{1},
+	// Rendered frames may come back single-part or multipart/related with
+	// one image part per frame — the cursor delivers every image.
+	frames, err := ic.RetrieveRenderedFrames(ctx, studyUID, seriesUID, sopUID, []int{1},
 		wadors.WithRenderedFormat("image/jpeg"),
 		wadors.WithRawQuery(url.Values{"quality": {"75"}}), // escape hatch: any private query parameter
 	)
 	if err != nil {
 		return fmt.Errorf("rendered frames: %w", err)
 	}
-	defer func() { _ = rimg.Close() }()
-	name, err = saveReader(outDir, "rendered-frame-1.jpg", rimg.Body)
-	if err != nil {
-		return err
+	defer func() { _ = frames.Close() }()
+	for p, err := range frames.Parts() {
+		if err != nil {
+			return err
+		}
+		name, err := saveReader(outDir, fmt.Sprintf("rendered-frame-%02d.jpg", p.Index()), p)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("rendered frame saved: %s (%s)\n", name, p.ContentType())
 	}
-	fmt.Println("rendered frame saved:", name)
 	return nil
 }
 

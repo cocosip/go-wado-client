@@ -48,14 +48,23 @@ func TestRequestValidate(t *testing.T) {
 			ContentType: testContentTypeDICOM, Rows: 512}},
 		{"region with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeDICOM, Region: &[4]float64{0.1, 0.1, 0.9, 0.9}}},
-		// PS3.18 §8.2.4: region is forbidden together with a Presentation Object.
-		{"region with presentation state", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
-			ContentType: testContentTypeJPEG, Region: &[4]float64{0.1, 0.1, 0.9, 0.9},
+		// PS3.18 §9.5.1.2.4: "If either parameter is present, both shall be
+		// present."
+		{"rows only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeJPEG, Rows: 512}},
+		{"columns only", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeJPEG, Columns: 512}},
+		// PS3.18 §9.5.1.2.7: with a Presentation State the only other optional
+		// parameters allowed are annotation, imageQuality, region and
+		// rows/columns — not frameNumber.
+		{"frameNumber with presentation state", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+			ContentType: testContentTypeJPEG, FrameNumber: 3,
 			PresentationUID: testPresentationUID, PresentationSeriesUID: testPresentationSeriesUID}},
-		// PS3.18 §8.2: annotation is burned into image pixels — rendered-only.
+		// PS3.18 §9.5.1.2.2: annotation is burned into image pixels —
+		// rendered-only.
 		{"annotation with dicom content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeDICOM, Annotation: []string{AnnotationPatient}}},
-		// PS3.18 §8.1: anonymize applies to DICOM responses only.
+		// PS3.18 §9.4.1.2.1: anonymize applies to DICOM responses only.
 		{"anonymize with rendered content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			ContentType: testContentTypeJPEG, Anonymize: true}},
 		{"invalid content type", Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
@@ -82,12 +91,10 @@ func TestRequestValidate(t *testing.T) {
 			WindowCenter: &wc, WindowWidth: &ww, Rows: 512, Columns: 512,
 			Region: &[4]float64{0.1, 0.1, 0.9, 0.9}, ImageQuality: 90, FrameNumber: 3,
 			Annotation: []string{AnnotationPatient}},
-		// PS3.18 §8.2.2: rows/columns are independently optional — one alone
-		// lets the server preserve the aspect ratio.
+		// PS3.18 §9.5.1.2.7: region combines with a Presentation State.
 		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
-			ContentType: testContentTypeJPEG, Rows: 512},
-		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
-			ContentType: testContentTypeJPEG, Columns: 512},
+			ContentType: testContentTypeJPEG, Region: &[4]float64{0.1, 0.1, 0.9, 0.9},
+			PresentationUID: testPresentationUID, PresentationSeriesUID: testPresentationSeriesUID},
 		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
 			PresentationUID: testPresentationUID, PresentationSeriesUID: testPresentationSeriesUID},
 		{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
@@ -160,7 +167,7 @@ func TestRequestQueryEncoding(t *testing.T) {
 		}
 	}
 
-	// The default naming is the current standard: anonymize (PS3.18 §8.1.7).
+	// The default naming is the current standard: anonymize (PS3.18 §9.4.1.2.1).
 	// Legacy naming switches the anonymization key to the pre-2019 name.
 	lq := req.query(true)
 	if got := lq.Get("anonymity"); got != anonymizeEnabled {
@@ -174,5 +181,13 @@ func TestRequestQueryEncoding(t *testing.T) {
 	plain := Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID}.query(false)
 	if _, ok := plain["contentType"]; ok {
 		t.Error("contentType must be omitted when empty")
+	}
+
+	// Tiny region coordinates must stay in plain decimal notation — servers
+	// choke on exponent forms like "1e-07" (same rationale as window values).
+	tiny := Request{StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID,
+		Region: &[4]float64{1e-07, 0, 5e-06, 1}}.query(false)
+	if got := tiny.Get("region"); got != "0.0000001,0,0.000005,1" {
+		t.Errorf("region = %q, want plain decimal notation", got)
 	}
 }

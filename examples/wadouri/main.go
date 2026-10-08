@@ -130,7 +130,7 @@ func run(ctx context.Context, endpoint, studyUID, seriesUID, objectUID, outDir s
 		WindowCenter: &wc, WindowWidth: &ww,
 		Annotation: []string{wadouri.AnnotationPatient, wadouri.AnnotationTechnique},
 		Extra:      url.Values{"caller": {"example"}}, // pass-through for private gateway parameters
-		// Anonymize is a DICOM-only parameter (PS3.18 §8.1) — it would be
+		// Anonymize is a DICOM-only parameter (PS3.18 §9.4.1.2.1) — it would be
 		// rejected locally on this rendered request. Use it like this instead:
 		//   u3.Retrieve(ctx, wadouri.Request{..., Anonymize: true})
 	})

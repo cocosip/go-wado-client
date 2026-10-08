@@ -77,7 +77,7 @@ func TestRetrieveAnonymizeNaming(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Default: the current standard name (PS3.18 §8.1.7, in force since 2019).
+	// Default: the current standard name (PS3.18 §9.4.1.2.1).
 	c, _ := New(srv.URL + "/wado")
 	resp, err := c.Retrieve(context.Background(), Request{
 		StudyUID: testStudyUID, SeriesUID: testSeriesUID, ObjectUID: testObjectUID, Anonymize: true,

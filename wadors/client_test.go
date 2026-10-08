@@ -189,8 +189,8 @@ func TestFork(t *testing.T) {
 }
 
 // TestCharsetQueryParam pins the standard negotiation mechanism: the charset
-// RetrieveOption travels as the PS3.18 charset query parameter (§6.5 of the
-// 2019a text), not as an Accept-Charset header.
+// RetrieveOption travels as the PS3.18 charset query parameter (§8.3.3.2 of the
+// current text), not as an Accept-Charset header.
 func TestCharsetQueryParam(t *testing.T) {
 	var gotQuery url.Values
 	var gotAcceptCharset string
@@ -230,7 +230,7 @@ func TestRetrieveFramesLongListWarning(t *testing.T) {
 	var buf bytes.Buffer
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="application/octet-stream"`)
-		_, _ = w.Write(multipartBody([]fakePart{{ct: "application/octet-stream", body: "F"}}))
+		_, _ = w.Write(multipartBody([]fakePart{{ct: mediaTypeOctetStream, body: "F"}}))
 	}))
 	defer srv.Close()
 

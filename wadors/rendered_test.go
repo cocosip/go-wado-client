@@ -129,7 +129,11 @@ func TestRenderedRawQueryOverride(t *testing.T) {
 }
 
 func TestRenderedValidation(t *testing.T) {
-	c, err := New("https://h.example.com/dicomweb")
+	var got captured
+	srv := newRenderedServer(t, &got)
+	defer srv.Close()
+
+	c, err := New(srv.URL + "/api/wado/H1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +152,25 @@ func TestRenderedValidation(t *testing.T) {
 		if !errors.Is(err, wado.ErrInvalidRequest) {
 			t.Errorf("quality %d err = %v, want ErrInvalidRequest", q, err)
 		}
+	}
+	// §8.3.5.1.5 fixes the iccprofile keyword values; anything but the
+	// lowercase keywords is rejected in standard mode.
+	for _, icc := range []string{"sRGB", "bogus"} {
+		_, err = c.RetrieveRenderedInstance(ctx, "1.2.3", "1.2.4", "1.2.5", WithICCProfile(icc))
+		if !errors.Is(err, wado.ErrInvalidRequest) {
+			t.Errorf("iccprofile %q err = %v, want ErrInvalidRequest", icc, err)
+		}
+	}
+	// Every standard keyword passes...
+	for _, icc := range []string{"no", "yes", "srgb", "adobergb", "rommrgb", "displayp3"} {
+		if _, err = c.RetrieveRenderedInstance(ctx, "1.2.3", "1.2.4", "1.2.5", WithICCProfile(icc)); err != nil {
+			t.Errorf("iccprofile %q err = %v", icc, err)
+		}
+	}
+	// ...and legacy mode speaks a private dialect whose values pass through.
+	legacy, _ := New(srv.URL+"/api/wado/H1", wado.WithLegacyParamNames())
+	if _, err = legacy.RetrieveRenderedInstance(ctx, "1.2.3", "1.2.4", "1.2.5", WithICCProfile("sRGB")); err != nil {
+		t.Errorf("legacy iccprofile err = %v", err)
 	}
 }
 
@@ -228,18 +251,99 @@ func TestRenderedWindowFunction(t *testing.T) {
 
 func TestRetrieveRenderedFrames(t *testing.T) {
 	var got captured
-	srv := newRenderedServer(t, &got)
+	var gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.path, got.query, gotAccept = r.URL.Path, r.URL.Query(), r.Header.Get("Accept")
+		w.Header().Set("Content-Type", mediaTypeJPEG)
+		_, _ = w.Write([]byte("JPGDATA"))
+	}))
 	defer srv.Close()
 
 	c, _ := New(srv.URL + "/api/wado/H1")
-	img, err := c.RetrieveRenderedFrames(context.Background(), "1.2.3", "1.2.4", "1.2.5", []int{2, 1})
+	imgs, err := c.RetrieveRenderedFrames(context.Background(), "1.2.3", "1.2.4", "1.2.5", []int{2, 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = img.Close() }()
+	defer func() { _ = imgs.Close() }()
 
 	want := "/api/wado/H1/studies/1.2.3/series/1.2.4/instances/1.2.5/frames/1,2/rendered"
 	if got.path != want {
 		t.Errorf("path = %q, want %q", got.path, want)
+	}
+	if gotAccept != mediaTypeJPEG {
+		t.Errorf("Accept = %q, want image/jpeg", gotAccept)
+	}
+	// A single-part reply is delivered as one image.
+	p, err := imgs.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(p)
+	if string(b) != "JPGDATA" || p.ContentType() != mediaTypeJPEG {
+		t.Errorf("part = %q (%s)", b, p.ContentType())
+	}
+	if _, err := imgs.Next(); err != io.EOF {
+		t.Errorf("Next after single image = %v, want io.EOF", err)
+	}
+}
+
+// TestRetrieveRenderedFramesMultipart covers the PS3.18 §10.4.4 multipart
+// reply form: a conformant server may answer a rendered frame list with
+// multipart/related carrying one image part per frame — the cursor must
+// deliver every image, not only the first.
+func TestRetrieveRenderedFramesMultipart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", `multipart/related; boundary="BNDRY"; type="image/jpeg"`)
+		_, _ = w.Write(multipartBody([]fakePart{
+			{ct: mediaTypeJPEG, body: "FRAME1"},
+			{ct: mediaTypeJPEG, body: "FRAME2"},
+			{ct: mediaTypeJPEG, body: "FRAME3"},
+		}))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/api/wado/H1")
+	imgs, err := c.RetrieveRenderedFrames(context.Background(), "1.2.3", "1.2.4", "1.2.5", []int{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = imgs.Close() }()
+
+	var bodies []string
+	for p, err := range imgs.Parts() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(p)
+		bodies = append(bodies, string(b))
+		if p.ContentType() != mediaTypeJPEG {
+			t.Errorf("part %d content type = %q", p.Index(), p.ContentType())
+		}
+	}
+	if len(bodies) != 3 || bodies[0] != "FRAME1" || bodies[2] != "FRAME3" {
+		t.Errorf("bodies = %v, want all three frames", bodies)
+	}
+}
+
+// TestRetrieveRenderedFramesAcceptOverride pins WithRenderedAccept: the
+// multipart reply form can be negotiated explicitly.
+func TestRetrieveRenderedFramesAcceptOverride(t *testing.T) {
+	var gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", mediaTypeJPEG)
+		_, _ = w.Write([]byte("JPGDATA"))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/api/wado/H1")
+	imgs, err := c.RetrieveRenderedFrames(context.Background(), "1.2.3", "1.2.4", "1.2.5", []int{1},
+		WithRenderedAccept(`multipart/related; type="image/jpeg"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = imgs.Close() }()
+	if gotAccept != `multipart/related; type="image/jpeg"` {
+		t.Errorf("Accept = %q", gotAccept)
 	}
 }

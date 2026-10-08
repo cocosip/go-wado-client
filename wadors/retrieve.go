@@ -35,9 +35,9 @@ func (c *Client) RetrieveInstance(ctx context.Context, studyUID, seriesUID, sopU
 		"application/dicom", opts)
 }
 
-// applyCharset applies the PS3.18 WADO-RS charset request parameter (the
-// query form defined by §6.5 of the 2019a text); WADO-URI uses the same
-// parameter name in its query string.
+// applyCharset applies the PS3.18 charset query parameter (§8.3.3.2, the
+// hyperlink-friendly equivalent of the Accept-Charset header field);
+// WADO-URI uses the same parameter name in its query string.
 func applyCharset(u *url.URL, charset string) {
 	if charset == "" {
 		return

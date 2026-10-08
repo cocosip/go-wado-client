@@ -1,6 +1,6 @@
 // Package wadors implements the WADO-RS client (the Retrieve transaction of
-// the Studies Service, PS3.18): Study/Series/Instance retrieval (streaming
-// multipart/related), metadata (dicom+json, parsed by go-dicom's
+// the Studies Service, PS3.18 §10.4): Study/Series/Instance retrieval
+// (streaming multipart/related), metadata (dicom+json, parsed by go-dicom's
 // serialization), frame pixel data, rendered images and Bulk Data.
 //
 // The BaseURL is bound at construction (immutable, safe for concurrent use):

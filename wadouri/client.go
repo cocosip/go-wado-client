@@ -1,5 +1,5 @@
 // Package wadouri implements the WADO-URI client (the URI Service,
-// PS3.18).
+// PS3.18 Chapter 9).
 //
 // WADO-URI is a single GET: the standard defines no path at all; the
 // resource is identified entirely by query parameters (requestType=WADO +
