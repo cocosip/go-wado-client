@@ -56,14 +56,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.27'
+          # Pinned to 1.27.1: golangci-lint v2.13.1 cannot read Go 1.27.2
+          # export data ("version 5 > maximum supported version 4").
+          # Unpin once a golangci-lint release built with Go 1.27.2+ ships.
+          go-version: '1.27.1'
           cache: true
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.1
-          install-mode: goinstall
           args: --timeout=10m
 
   build:
