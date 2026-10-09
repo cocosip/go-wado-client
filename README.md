@@ -17,11 +17,13 @@ Services) transactions:
   identified entirely by query parameters, returning a DICOM file or a
   rendered image.
 - **Capabilities discovery** (`wado.Service.Capabilities` and a
-  `Capabilities` method on both REST clients) — the OPTIONS-based Retrieve
-  Capabilities transaction (PS3.18 §8.9): the `Allow` header method list
-  every HTTP origin server answers, plus the WADL Capabilities Description
-  (§8.9.4: `application/vnd.sun.wadl+xml` and its JSON representation) parsed
-  into a uniform model.
+  `Capabilities` method on all three service clients) — the OPTIONS-based
+  Retrieve Capabilities transaction (PS3.18 §8.9): the `Allow` header method
+  list every HTTP origin server answers, plus the WADL Capabilities
+  Description (§8.9.4: `application/vnd.sun.wadl+xml` and its JSON
+  representation) parsed into a uniform model. The URI Service is not
+  required to implement the transaction, so its client surfaces gateways
+  without it as 404/405 errors.
 
 DICOM processing (parsing, dicom+json, pixel codecs) is delegated to
 [cocosip/go-dicom](https://github.com/cocosip/go-dicom) and
@@ -159,7 +161,7 @@ result sets stream dataset by dataset via the `*Stream` variants
 ## Capabilities discovery (HTTP OPTIONS)
 
 ```go
-caps, err := c.Capabilities(ctx) // c = *wadors.Client or *qido.Client
+caps, err := c.Capabilities(ctx) // c = *wadors.Client, *qido.Client or *wadouri.Client
 if err != nil {
     if wado.IsCapabilitiesUnsupported(err) { /* 405/501: legacy gateway */ }
     log.Fatal(err)
@@ -173,8 +175,10 @@ fmt.Println(caps.WADLSupports("/studies", "GET")) // WADL payload, if returned
 `Allow` header; when the server implements the PS3.18 §8.9 transaction, the
 WADL Capabilities Description is parsed from either standard representation
 (`application/vnd.sun.wadl+xml` or `application/json`) into
-`caps.WADL` — resource paths, methods and response media types. Unrelated
-payloads are passed through verbatim in `caps.Raw`.
+`caps.WADL` — resource paths, methods and response media types. Payloads
+under an unknown content type are passed through verbatim in `caps.Raw`; a
+payload declared as XML or JSON that is not a WADL document (a gateway error
+page, for instance) is an error.
 
 ## Multiple hospitals / tenants
 

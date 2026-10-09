@@ -196,9 +196,12 @@ func parseAllow(h http.Header) []string {
 }
 
 // parseWADL decodes a Capabilities Description by content type: WADL XML,
-// its JSON representation, or a sniffed fallback; an unparsable declared
-// WADL payload is an error, an unrelated content type (a gateway error page
-// with 200, for instance) yields (nil, nil).
+// its JSON representation, or a sniffed fallback. A declared XML/JSON payload
+// that is not a WADL document — unparsable bytes, or valid syntax without the
+// application/resources element (a gateway error page served under a declared
+// type, for instance) — is an error, so a caller can never mistake it for an
+// empty WADL; an unrelated content type yields (nil, nil) with the bytes kept
+// in Capabilities.Raw.
 func parseWADL(body []byte, ct string) (*WADL, error) {
 	if len(strings.TrimSpace(string(body))) == 0 {
 		return nil, nil
@@ -223,11 +226,13 @@ func parseWADL(body []byte, ct string) (*WADL, error) {
 // --- WADL XML (application/vnd.sun.wadl+xml) ---
 
 type wadlXMLApplication struct {
-	XMLName   xml.Name `xml:"application"`
-	Resources struct {
-		Base     string            `xml:"base,attr"`
-		Resource []wadlXMLResource `xml:"resource"`
-	} `xml:"resources"`
+	XMLName   xml.Name          `xml:"application"`
+	Resources *wadlXMLResources `xml:"resources"`
+}
+
+type wadlXMLResources struct {
+	Base     string            `xml:"base,attr"`
+	Resource []wadlXMLResource `xml:"resource"`
 }
 
 type wadlXMLResource struct {
@@ -249,6 +254,13 @@ func parseWADLXML(body []byte) (*WADL, error) {
 	var doc wadlXMLApplication
 	if err := xml.Unmarshal(body, &doc); err != nil {
 		return nil, err
+	}
+	// A document without a resources element is not a Capabilities
+	// Description: it must not masquerade as an empty WADL (zero resources
+	// is what a server with no endpoints would legitimately declare via
+	// <resources/>).
+	if doc.Resources == nil {
+		return nil, errors.New("not a WADL document (no application/resources element)")
 	}
 	return &WADL{
 		Base:      doc.Resources.Base,
@@ -284,11 +296,13 @@ func xmlMethods(ms []wadlXMLMethod) []WADLMethod {
 
 type wadlJSONApplication struct {
 	Application struct {
-		Resources struct {
-			Base     string             `json:"@base"`
-			Resource []wadlJSONResource `json:"resource"`
-		} `json:"resources"`
+		Resources *wadlJSONResources `json:"resources"`
 	} `json:"application"`
+}
+
+type wadlJSONResources struct {
+	Base     string             `json:"@base"`
+	Resource []wadlJSONResource `json:"resource"`
 }
 
 type wadlJSONResource struct {
@@ -310,6 +324,14 @@ func parseWADLJSON(body []byte) (*WADL, error) {
 	var doc wadlJSONApplication
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, err
+	}
+	// Any valid JSON object unmarshals into the shape above (absent fields
+	// stay zero), so the application/resources element is what tells a
+	// Capabilities Description apart from an unrelated JSON document (a 200
+	// gateway error page served as application/json, for instance): without
+	// it the payload is an error, not an empty WADL.
+	if doc.Application.Resources == nil {
+		return nil, errors.New("not a WADL document (no application/resources element)")
 	}
 	res := doc.Application.Resources
 	return &WADL{

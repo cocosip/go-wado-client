@@ -225,6 +225,47 @@ func TestCapabilitiesUnknownPayload(t *testing.T) {
 	}
 }
 
+// TestCapabilitiesNonWADLDeclaredPayload pins that a 200 reply whose payload
+// is declared as one of the standard representations but is not a WADL
+// document is an error — never a silently empty WADL, which callers could not
+// distinguish from a server declaring zero resources.
+func TestCapabilitiesNonWADLDeclaredPayload(t *testing.T) {
+	cases := []struct{ name, ct, body string }{
+		{"json error page", MediaTypeWADLJSON, `{"error":"not found"}`},
+		{"json array", MediaTypeWADLJSON, `["unexpected"]`},
+		{"json null", MediaTypeWADLJSON, `null`},
+		{"xml without resources", MediaTypeWADLXML, `<application xmlns="http://wadl.dev.java.net/2009/02"><doc>hello</doc></application>`},
+		{"not xml at all", MediaTypeWADLXML, "<html>gateway page</html>"},
+	}
+	for _, c := range cases {
+		srv, _ := newCapabilitiesServer(t, http.StatusOK, c.ct, c.body, methodGet)
+		s := newTestService(t, srv.URL)
+		caps, err := s.Capabilities(context.Background())
+		if err == nil {
+			t.Errorf("%s: err = nil, WADL = %+v; want an error", c.name, caps.WADL)
+		}
+		if caps != nil {
+			t.Errorf("%s: capabilities non-nil on error", c.name)
+		}
+	}
+}
+
+// TestCapabilitiesEmptyWADLIsLegal pins the counterpart of the shape check:
+// <resources/> present but empty is a legitimate (vacuous) Capabilities
+// Description and parses to a non-nil WADL with zero resources.
+func TestCapabilitiesEmptyWADLIsLegal(t *testing.T) {
+	const body = `<application xmlns="http://wadl.dev.java.net/2009/02"><resources/></application>`
+	srv, _ := newCapabilitiesServer(t, http.StatusOK, MediaTypeWADLXML, body, "")
+	s := newTestService(t, srv.URL)
+	caps, err := s.Capabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caps.WADL == nil || len(caps.WADL.Resources) != 0 {
+		t.Errorf("WADL = %+v, want a parsed WADL with zero resources", caps.WADL)
+	}
+}
+
 func TestCapabilities204(t *testing.T) {
 	srv, _ := newCapabilitiesServer(t, http.StatusNoContent, "", "", "GET, OPTIONS")
 	s := newTestService(t, srv.URL)

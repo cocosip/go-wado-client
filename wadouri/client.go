@@ -69,6 +69,17 @@ func (c *Client) Fork(endpoint string, opts ...wado.Option) (*Client, error) {
 // Endpoint returns the current endpoint URL.
 func (c *Client) Endpoint() string { return c.svc.BaseURL() }
 
+// Capabilities performs OPTIONS-based capabilities discovery on this
+// service's endpoint (PS3.18 §8.9): the reply carries the Allow header
+// methods and, when the server provides it, the WADL Capabilities Description
+// parsed into wado.WADL. The URI Service is not a REST Web Service, so the
+// standard does not require servers to implement the transaction here —
+// gateways that do not answer 404, or 405/501 (see
+// wado.IsCapabilitiesUnsupported).
+func (c *Client) Capabilities(ctx context.Context, opts ...wado.CapabilitiesOption) (*wado.Capabilities, error) {
+	return c.svc.Capabilities(ctx, opts...)
+}
+
 // Response is a WADO-URI response: always a single-part stream (a DICOM
 // file or a rendered image).
 type Response struct {

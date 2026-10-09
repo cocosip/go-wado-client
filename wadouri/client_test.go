@@ -166,6 +166,44 @@ func TestForkAndEndpoint(t *testing.T) {
 	}
 }
 
+// TestCapabilities pins the OPTIONS-based discovery on the configured
+// endpoint: method, endpoint path (prefix included), Allow and the WADL
+// payload (PS3.18 §8.9; the URI Service is not required to implement it, so
+// servers without it surface as 404/405 *StatusError).
+func TestCapabilities(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/wado/H0001/RIS/wado-uri" {
+			t.Errorf("path = %q, want the configured endpoint", r.URL.Path)
+		}
+		w.Header().Set("Allow", "GET, OPTIONS")
+		w.Header().Set("Content-Type", wado.MediaTypeWADLXML)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<application xmlns="http://wadl.dev.java.net/2009/02">
+  <resources base="https://srv.example.com">
+    <resource path="/wado">
+      <method name="GET"/>
+    </resource>
+  </resources>
+</application>`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL + "/api/wado/H0001/RIS/wado-uri")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps, err := c.Capabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.Supports("GET") || caps.Supports("POST") {
+		t.Errorf("Allow = %v, want [GET OPTIONS]", caps.Allow)
+	}
+	if caps.WADL == nil || !caps.WADLSupports("/wado", "GET") {
+		t.Errorf("WADL = %+v, want a parsed /wado resource", caps.WADL)
+	}
+}
+
 // TestResponseCloseZeroValue pins that Close is safe on the zero value
 // (misuse must not panic).
 func TestResponseCloseZeroValue(t *testing.T) {
