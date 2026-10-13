@@ -150,33 +150,42 @@ func (c *Client) searchStream(ctx context.Context, u *url.URL, q Query, opts []S
 		return nil, fmt.Errorf("qido: search response: %w", err)
 	}
 	// The final (post-redirect) request URL is the PS3.18 base for relative
-	// BulkDataURI resolution.
-	return &ResultsStream{parts: parts, base: resp.Request.URL, header: resp.Header.Clone()}, nil
+	// BulkDataURI resolution. A wrapper RoundTripper may omit resp.Request, so
+	// fall back to the URL we asked for.
+	base := u
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	}
+	return &ResultsStream{parts: parts, base: base, header: resp.Header.Clone()}, nil
 }
 
 // encodeQuery renders the RawQuery value: ordered standard parameters, then
-// Extra overrides appended (same-name standard parameters are dropped).
+// Extra overrides appended (same-name standard parameters are dropped,
+// case-insensitively: query names are case-sensitive on the wire, but a
+// caller writing "Limit" plainly means "limit").
+//
 // Values are percent-encoded per PS3.18 §8.3.4 ("#, [, ], &, = and all
-// non-ASCII shall be percent encoded") with the list comma left bare, the
-// form the standard's own examples use (includefield=00081048,00081049 and
-// UID List matching).
+// non-ASCII shall be percent encoded"). Commas stay bare only where the
+// standard's own examples use them as the value-list separator (includefield,
+// UID lists, orderby, aetitle); a comma inside an ordinary scalar matching
+// value is escaped, so it cannot be mistaken for a list separator.
 func (q Query) encodeQuery() string {
 	ps := q.params()
 	if len(q.Extra) > 0 {
 		override := make(map[string]bool, len(q.Extra))
 		for k := range q.Extra {
-			override[k] = true
+			override[strings.ToLower(k)] = true
 		}
 		kept := ps[:0]
 		for _, p := range ps {
-			if !override[p.key] {
+			if !override[strings.ToLower(p.key)] {
 				kept = append(kept, p)
 			}
 		}
 		ps = kept
 		for _, k := range slices.Sorted(maps.Keys(q.Extra)) {
 			for _, v := range q.Extra[k] {
-				ps = append(ps, param{k, v})
+				ps = append(ps, param{key: k, val: v})
 			}
 		}
 	}
@@ -187,13 +196,17 @@ func (q Query) encodeQuery() string {
 		}
 		b.WriteString(url.QueryEscape(p.key))
 		b.WriteByte('=')
-		b.WriteString(queryEscape(p.val))
+		if p.list {
+			b.WriteString(queryEscape(p.val))
+		} else {
+			b.WriteString(url.QueryEscape(p.val))
+		}
 	}
 	return b.String()
 }
 
-// queryEscape percent-encodes a parameter value; the list comma stays bare
-// (see encodeQuery).
+// queryEscape percent-encodes a value while keeping the list comma bare (see
+// encodeQuery).
 func queryEscape(v string) string {
 	return strings.ReplaceAll(url.QueryEscape(v), "%2C", ",")
 }

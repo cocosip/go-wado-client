@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -32,6 +33,12 @@ type Core struct {
 	ua           string
 	lenientUID   bool
 	legacyParams bool
+	bulkDataHost BulkDataHostPolicy
+	// ownTransport records that hc was built by this library (rather than
+	// supplied via WithHTTPClient), so WithMaxIdleConnsPerHost may still be
+	// applied to it. A caller-supplied client is never touched, matching that
+	// option's documented scope.
+	ownTransport bool
 }
 
 // NewCore builds a shared core from the given options. It fails when the
@@ -63,6 +70,8 @@ func coreFromSettings(s *settings) (*Core, error) {
 		ua:           s.userAgent,
 		lenientUID:   s.lenientUID,
 		legacyParams: s.legacyParams,
+		bulkDataHost: s.bulkDataHost,
+		ownTransport: s.httpClient == nil || s.httpClientOwned,
 	}
 	if c.ua == "" {
 		c.ua = DefaultUserAgent
@@ -78,14 +87,22 @@ func coreFromSettings(s *settings) (*Core, error) {
 
 // Fork clones the core and applies extra options on top; anything that does
 // not touch the transport keeps sharing the underlying connection pool.
+//
+// The idle-connection pool is carried forward explicitly: it lives in the
+// transport rather than in a Core field, so without this a Fork would silently
+// fall back to the default pool — and multi.Registry builds every per-target
+// client through Fork.
 func (c *Core) Fork(opts ...Option) (*Core, error) {
 	s := &settings{
-		httpClient:   c.hc,
-		editors:      append([]func(*http.Request) error(nil), c.editors...),
-		logger:       c.logger,
-		userAgent:    c.ua,
-		lenientUID:   c.lenientUID,
-		legacyParams: c.legacyParams,
+		httpClient:      c.hc,
+		httpClientOwned: c.ownTransport,
+		editors:         append([]func(*http.Request) error(nil), c.editors...),
+		logger:          c.logger,
+		userAgent:       c.ua,
+		lenientUID:      c.lenientUID,
+		legacyParams:    c.legacyParams,
+		bulkDataHost:    c.bulkDataHost,
+		maxIdlePerHost:  c.maxIdlePerHost(),
 	}
 	if c.retry.MaxAttempts > 1 {
 		cp := c.retry
@@ -95,39 +112,73 @@ func (c *Core) Fork(opts ...Option) (*Core, error) {
 	return coreFromSettings(s)
 }
 
+// maxIdlePerHost reports the per-host idle pool of this core's transport (0
+// when it is not an *http.Transport, in which case the setting never applied
+// either).
+func (c *Core) maxIdlePerHost() int {
+	if t, ok := c.hc.Transport.(*http.Transport); ok {
+		return t.MaxIdleConnsPerHost
+	}
+	return 0
+}
+
+// httpClientOrDefault resolves the client for a settings set.
+//
+// A caller-supplied client is handed back untouched unless a TLS config must
+// be layered on (which requires cloning, never mutating, its transport). An
+// owned client is cloned only when the idle-connection pool actually changes,
+// so a plain Fork keeps sharing the parent's *http.Client — and therefore its
+// connection pool, as Fork documents.
 func (s *settings) httpClientOrDefault() (*http.Client, error) {
-	if s.httpClient != nil {
-		switch {
-		case s.tlsCfg == nil:
-			return s.httpClient, nil
-		case s.httpClient.Transport == nil:
-			t := defaultTransport()
-			applyIdleConnsPerHost(t, s.maxIdlePerHost)
+	if s.httpClient == nil {
+		t := defaultTransport()
+		applyIdleConnsPerHost(t, s.maxIdlePerHost)
+		if s.tlsCfg != nil {
 			t.TLSClientConfig = s.tlsCfg
-			c2 := *s.httpClient
-			c2.Transport = t
-			return &c2, nil
-		default:
-			if t, ok := s.httpClient.Transport.(*http.Transport); ok {
-				tt := t.Clone()
-				tt.TLSClientConfig = s.tlsCfg
-				c2 := *s.httpClient
-				c2.Transport = tt
-				return &c2, nil
-			}
-			// A wrapper RoundTripper hides the *http.Transport that carries
-			// TLS settings — applying the config is impossible, and silently
-			// ignoring it would surface as opaque TLS failures at request
-			// time (hospital self-signed CAs are a core scenario).
-			return nil, errors.New("wado: WithTLSClientConfig cannot be combined with an HTTP client whose Transport is not *http.Transport")
 		}
+		return &http.Client{Transport: t}, nil
 	}
-	t := defaultTransport()
-	applyIdleConnsPerHost(t, s.maxIdlePerHost)
-	if s.tlsCfg != nil {
+
+	base, isTransport := s.httpClient.Transport.(*http.Transport)
+	if s.httpClient.Transport != nil && !isTransport && s.tlsCfg != nil {
+		// A wrapper RoundTripper hides the *http.Transport that carries TLS
+		// settings — applying the config is impossible, and silently ignoring
+		// it would surface as opaque TLS failures at request time (hospital
+		// self-signed CAs are a core scenario).
+		return nil, errors.New("wado: WithTLSClientConfig cannot be combined with an HTTP client whose Transport is not *http.Transport")
+	}
+
+	// The idle-pool setting only ever applies to a client this library built;
+	// a caller-supplied transport is never mutated (see
+	// WithMaxIdleConnsPerHost).
+	adjustIdle := isTransport && s.httpClientOwned && s.maxIdlePerHost > 0 &&
+		base.MaxIdleConnsPerHost != s.maxIdlePerHost
+
+	switch {
+	case s.tlsCfg == nil && !adjustIdle:
+		// Nothing transport-level to change: share the client (and its
+		// connection pool) as-is.
+		return s.httpClient, nil
+	case s.httpClient.Transport == nil:
+		t := defaultTransport()
+		applyIdleConnsPerHost(t, s.maxIdlePerHost)
 		t.TLSClientConfig = s.tlsCfg
+		c2 := *s.httpClient
+		c2.Transport = t
+		return &c2, nil
+	default:
+		// Clone rather than mutate: the parent core keeps its own transport.
+		tt := base.Clone()
+		if s.tlsCfg != nil {
+			tt.TLSClientConfig = s.tlsCfg
+		}
+		if adjustIdle {
+			tt.MaxIdleConnsPerHost = s.maxIdlePerHost
+		}
+		c2 := *s.httpClient
+		c2.Transport = tt
+		return &c2, nil
 	}
-	return &http.Client{Transport: t}, nil
 }
 
 // applyIdleConnsPerHost applies the WithMaxIdleConnsPerHost override to a
@@ -160,6 +211,22 @@ func defaultTransport() *http.Transport {
 // truncated on the second attempt. All requests issued by this library are
 // bodyless (GET/OPTIONS).
 func (c *Core) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
+	return c.do(ctx, req, true)
+}
+
+// DoWithoutCredentials is Do with the auth/request editors skipped: the
+// request carries the User-Agent but none of the caller's credentials. It
+// backs the cross-host Bulk Data policy (see WithBulkDataHostPolicy), where
+// following a server-supplied URI to another host must not leak the gateway's
+// credentials to it.
+func (c *Core) DoWithoutCredentials(ctx context.Context, req *http.Request) (*http.Response, error) {
+	return c.do(ctx, req, false)
+}
+
+func (c *Core) do(ctx context.Context, req *http.Request, withEditors bool) (*http.Response, error) {
+	if ctx == nil {
+		return nil, errors.New("wado: nil context")
+	}
 	p := c.retry.normalized()
 	if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil && p.MaxAttempts > 1 {
 		return nil, errors.New("wado: request carries a body that cannot be replayed (no GetBody) while retry is enabled")
@@ -173,9 +240,11 @@ func (c *Core) Do(ctx context.Context, req *http.Request) (*http.Response, error
 			}
 			r.Body = b
 		}
-		for _, e := range c.editors {
-			if err := e(r); err != nil {
-				return nil, fmt.Errorf("wado: request editor: %w", err)
+		if withEditors {
+			for _, e := range c.editors {
+				if err := e(r); err != nil {
+					return nil, fmt.Errorf("wado: request editor: %w", err)
+				}
 			}
 		}
 		if r.Header.Get("User-Agent") == "" {
@@ -238,12 +307,25 @@ func retryableStatus(code int) bool {
 	return false
 }
 
+// parseRetryAfter returns the delay requested by a Retry-After header, or 0
+// when the header is absent or unparsable.
+//
+// The delay-seconds form is validated against the range a time.Duration can
+// hold: time.Duration(secs) * time.Second overflows for secs above
+// math.MaxInt64/1e9 and wraps negative, which would silently disable the
+// header instead of honoring it (a hostile or buggy gateway could also use
+// the overflow to skip the cap applied by sleepBackoff). Out-of-range values
+// are clamped to the maximum representable duration.
 func parseRetryAfter(h http.Header) time.Duration {
 	v := h.Get("Retry-After")
 	if v == "" {
 		return 0
 	}
 	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		const maxSeconds = int64(math.MaxInt64) / int64(time.Second)
+		if int64(secs) > maxSeconds {
+			return time.Duration(math.MaxInt64)
+		}
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil {
@@ -255,10 +337,7 @@ func parseRetryAfter(h http.Header) time.Duration {
 }
 
 func sleepBackoff(ctx context.Context, p RetryPolicy, attempt int, retryAfter time.Duration) error {
-	bo := p.InitialBackoff << (attempt - 1)
-	if bo <= 0 || bo > p.MaxBackoff {
-		bo = p.MaxBackoff
-	}
+	bo := backoffFor(p, attempt)
 	// Retry-After is honored but capped at MaxBackoff: a hostile or buggy
 	// gateway must not be able to stall the client past the configured
 	// ceiling.
@@ -284,6 +363,35 @@ func sleepBackoff(ctx context.Context, p RetryPolicy, attempt int, retryAfter ti
 	}
 }
 
+// backoffFor computes InitialBackoff<<(attempt-1) capped at MaxBackoff.
+//
+// The shift is bounded before it happens: a large attempt count would
+// overflow int64 and wrap negative (or to a small positive value), which
+// would shorten the sleep instead of lengthening it. Capping the shift count
+// first keeps the result monotonic up to MaxBackoff.
+func backoffFor(p RetryPolicy, attempt int) time.Duration {
+	if p.MaxBackoff <= 0 {
+		return 0
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	bo := p.InitialBackoff
+	if bo <= 0 {
+		return p.MaxBackoff
+	}
+	for i := 1; i < attempt; i++ {
+		if bo >= p.MaxBackoff {
+			return p.MaxBackoff
+		}
+		bo <<= 1
+	}
+	if bo <= 0 || bo > p.MaxBackoff {
+		return p.MaxBackoff
+	}
+	return bo
+}
+
 // CheckUID validates a UID against the whitelist; WithLenientUID skips it.
 func (c *Core) CheckUID(field, uid string) error {
 	if c.lenientUID {
@@ -305,3 +413,6 @@ func (c *Core) Logger() *slog.Logger { return c.logger }
 
 // LenientUID reports whether UID validation is relaxed.
 func (c *Core) LenientUID() bool { return c.lenientUID }
+
+// BulkDataHost returns the configured Bulk Data host policy.
+func (c *Core) BulkDataHost() BulkDataHostPolicy { return c.bulkDataHost }

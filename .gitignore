@@ -40,3 +40,7 @@ Thumbs.db
 .claude/
 .cache/
 docs/superpowers/
+
+# Local Go/golangci-lint caches (used when the default cache is not writable)
+.gocache/
+.glcache/

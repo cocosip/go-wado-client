@@ -100,8 +100,13 @@ func requireEOF(dec *json.Decoder) error {
 	return nil
 }
 
-// firstNonSpace returns the first byte of br that is not JSON whitespace.
+// firstNonSpace returns the first byte of br that is not JSON whitespace,
+// skipping a leading UTF-8 byte-order mark. RFC 8259 does not allow a BOM,
+// but real gateways emit one, and the JSON decoder would otherwise fail on it.
 func firstNonSpace(br *bufio.Reader) (byte, error) {
+	if b, err := br.Peek(3); err == nil && bytes.Equal(b, []byte{0xEF, 0xBB, 0xBF}) {
+		_, _ = br.Discard(3)
+	}
 	for {
 		b, err := br.ReadByte()
 		if err != nil {

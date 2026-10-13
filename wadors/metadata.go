@@ -183,6 +183,12 @@ func (c *Client) metadataStream(ctx context.Context, u *url.URL, opts []Retrieve
 		return nil, err
 	}
 	// The final (post-redirect) request URL is the PS3.18 base for relative
-	// BulkDataURI resolution.
-	return &MetadataStream{mp: mp, base: resp.Request.URL}, nil
+	// BulkDataURI resolution. A wrapper RoundTripper is allowed to omit
+	// resp.Request (http.Client itself never populates it; only the standard
+	// transports do), so fall back to the URL we asked for.
+	base := u
+	if resp.Request != nil && resp.Request.URL != nil {
+		base = resp.Request.URL
+	}
+	return &MetadataStream{mp: mp, base: base}, nil
 }

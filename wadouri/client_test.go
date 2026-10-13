@@ -22,6 +22,10 @@ const (
 	testPresentationSeriesUID = "1.2.10"
 	// testContentTypeDICOM selects the DICOM instance transaction.
 	testContentTypeDICOM = "application/dicom"
+	// testRequestTypeWADO is the fixed value of the requestType parameter.
+	testRequestTypeWADO = "WADO"
+	// testTransferSyntaxEVRLE is Explicit VR Little Endian.
+	testTransferSyntaxEVRLE = "1.2.840.10008.1.2.1"
 )
 
 func TestRetrieveIntegration(t *testing.T) {

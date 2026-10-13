@@ -34,6 +34,19 @@ jobs:
       - name: Verify dependencies
         run: go mod verify
 
+      - name: Verify formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
       - name: Run tests
         shell: bash
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
@@ -42,9 +55,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27'
         uses: codecov/codecov-action@v7
         with:
-          file: ./coverage.txt
+          files: ./coverage.txt
           flags: unittests
           name: codecov-umbrella
+          fail_ci_if_error: false
 
   lint:
     name: Lint
@@ -56,15 +70,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          # Pinned to 1.27: golangci-lint v2.14.0 cannot read Go 1.27.2
-          # export data ("version 5 > maximum supported version 4").
-          # Unpin once a golangci-lint release built with Go 1.27.2+ ships.
+          # Keep this in step with the golangci-lint release pinned below and
+          # with the version used locally: the linter reads the export data of
+          # the toolchain that built it, so a newer Go can make it fail with
+          # "version N > maximum supported version M".
           go-version: '1.27'
           cache: true
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
+          # v2.14.0 is the version used locally (built with go1.27.2).
           version: v2.14.0
           args: --timeout=10m
 

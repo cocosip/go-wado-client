@@ -16,3 +16,8 @@ linters:
     - unparam
     - goconst
     - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

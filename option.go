@@ -21,6 +21,49 @@ type settings struct {
 	lenientUID     bool
 	legacyParams   bool
 	maxIdlePerHost int
+	bulkDataHost   BulkDataHostPolicy
+	// httpClientOwned marks httpClient as built by this library (a Forked
+	// core) rather than handed in by the caller. Only an owned client may have
+	// its idle-connection pool adjusted; a caller-supplied transport is never
+	// mutated, which is what WithMaxIdleConnsPerHost documents.
+	httpClientOwned bool
+}
+
+// BulkDataHostPolicy controls which hosts a Bulk Data URI returned by the
+// server may address, and whether the client's credentials travel there.
+//
+// A BulkDataURI is server-supplied data: a compromised or buggy gateway can
+// point it at an arbitrary (including internal) address. Because the
+// configured auth editors are applied to every request the client issues,
+// following such a URI verbatim would hand the caller's credentials to a host
+// of the server's choosing.
+type BulkDataHostPolicy int
+
+const (
+	// BulkDataHostAnyNoCredentials (the default) fetches Bulk Data from any
+	// host the URI names — cross-host object storage is standard-conformant —
+	// but does not attach the client's credentials (auth/request editors) when
+	// the target host differs from the service base URL.
+	BulkDataHostAnyNoCredentials BulkDataHostPolicy = iota
+	// BulkDataHostAny fetches from any host and forwards credentials there.
+	// Use only when the object store is trusted and genuinely needs the same
+	// credentials as the gateway.
+	BulkDataHostAny
+	// BulkDataHostSameOnly rejects Bulk Data URIs whose host differs from the
+	// service base URL.
+	BulkDataHostSameOnly
+)
+
+// String implements fmt.Stringer for diagnostics.
+func (p BulkDataHostPolicy) String() string {
+	switch p {
+	case BulkDataHostAny:
+		return "any-host"
+	case BulkDataHostSameOnly:
+		return "same-host-only"
+	default:
+		return "any-host-without-credentials"
+	}
 }
 
 // WithHTTPClient takes over the HTTP client entirely (proxying etc.).
@@ -123,7 +166,23 @@ func WithLegacyParamNames() Option { return func(s *settings) { s.legacyParams =
 // the pool are discarded after use and pay a TLS handshake every time;
 // irrelevant for HTTP/2 (one connection multiplexes all requests). No effect
 // when WithHTTPClient supplies a client with its own transport.
+//
+// The setting survives Fork: clients derived from a configured core inherit
+// it (multi.Registry builds every per-target client that way).
 func WithMaxIdleConnsPerHost(n int) Option { return func(s *settings) { s.maxIdlePerHost = n } }
+
+// WithBulkDataHostPolicy controls how Bulk Data URIs that point at another
+// host are handled; the default is BulkDataHostAnyNoCredentials.
+//
+// BulkDataURIs come from server metadata, so following them blindly lets a
+// gateway redirect the client (and, with auth editors configured, its
+// credentials) at an arbitrary host. The default keeps cross-host object
+// storage working while withholding credentials from it; use
+// BulkDataHostSameOnly in a locked-down deployment, or BulkDataHostAny when
+// the object store is trusted and needs the same credentials.
+func WithBulkDataHostPolicy(p BulkDataHostPolicy) Option {
+	return func(s *settings) { s.bulkDataHost = p }
+}
 
 // RetryPolicy describes the retry behavior for idempotent GETs.
 type RetryPolicy struct {

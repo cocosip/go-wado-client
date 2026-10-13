@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -90,10 +91,15 @@ type Response struct {
 }
 
 // IsDICOM reports whether the response is a DICOM file
-// (application/dicom).
+// (application/dicom, or a parameterised form of it such as
+// "application/dicom; transfer-syntax=..."). The dicom+json and dicom+xml
+// representations are deliberately excluded: they are not DICOM files.
 func (r *Response) IsDICOM() bool {
 	ct := strings.ToLower(strings.TrimSpace(r.ContentType))
-	return strings.HasPrefix(ct, "application/dicom")
+	if mt, _, err := mime.ParseMediaType(ct); err == nil {
+		ct = mt
+	}
+	return ct == mediaTypeDICOM
 }
 
 // Close closes the underlying response. It is safe on the zero value.
@@ -120,7 +126,7 @@ func (c *Client) Retrieve(ctx context.Context, req Request) (*Response, error) {
 	u.RawQuery = req.query(c.svc.Core().LegacyParams()).Encode()
 	accept := strings.TrimSpace(req.ContentType)
 	if accept == "" {
-		accept = "application/dicom"
+		accept = mediaTypeDICOM
 	}
 	resp, err := c.svc.Do(ctx, http.MethodGet, &u, func(hreq *http.Request) {
 		hreq.Header.Set("Accept", accept)

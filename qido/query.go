@@ -66,8 +66,14 @@ type Query struct {
 }
 
 // Match is one matching key. Set exactly one of Value (single value,
-// wildcards and ranges included) or Values (UID List matching — the UIDs are
-// comma-joined into a single value per PS3.18 §8.3.4).
+// wildcards and ranges included) or Values (multiple values for one
+// attribute, comma-joined into a single parameter per PS3.18 §8.3.4).
+//
+// Values are UID-validated only for attributes whose VR is UI; for any other
+// attribute they are passed through as ordinary matching values (PS3.18
+// §8.3.4.6 Multiple Value Matching, e.g. Modality=["CT","MR"]). Set
+// Value to "" together with Query.EmptyValueMatching to request empty-value
+// matching (§8.3.4.5).
 type Match struct {
 	Attribute string
 	Value     string
@@ -119,17 +125,38 @@ func (q Query) validate(checkUID func(field, uid string) error) error {
 		case m.Value != "" && len(m.Values) > 0:
 			return &wado.RequestError{Field: m.Attribute, Reason: "set either Value or Values, not both"}
 		case m.Value == "" && len(m.Values) == 0:
-			return &wado.RequestError{Field: m.Attribute, Reason: "match requires a value"}
+			// An empty value is the §8.3.4.5 Empty Value Matching form
+			// ("{attributeID}="), which is only meaningful together with the
+			// emptyvaluematching toggle; without it the request would match
+			// nothing on every conformant server.
+			if q.EmptyValueMatching == nil || !*q.EmptyValueMatching {
+				return &wado.RequestError{
+					Field:  m.Attribute,
+					Reason: "match requires a value (set Query.EmptyValueMatching to match on an empty value)",
+				}
+			}
 		case len(m.Values) > 0:
-			for _, uid := range m.Values {
-				if err := checkUID(m.Attribute, uid); err != nil {
-					return err
+			// Values are validated as UIDs only for UID-valued attributes:
+			// §8.3.4.6 allows a value list for any attribute (e.g.
+			// Modality=["CT","MR"]), and forcing the UID whitelist on those
+			// would make Multiple Value Matching unusable.
+			if isUIDAttribute(m.Attribute) {
+				for _, uid := range m.Values {
+					if err := checkUID(m.Attribute, uid); err != nil {
+						return err
+					}
+				}
+			} else {
+				for _, v := range m.Values {
+					if v == "" {
+						return &wado.RequestError{Field: m.Attribute, Reason: "value list must not contain an empty value"}
+					}
 				}
 			}
 		}
 	}
 	for _, f := range q.IncludeFields {
-		if f == "all" {
+		if strings.EqualFold(f, "all") {
 			continue
 		}
 		if err := validateAttrID(f); err != nil {
@@ -152,6 +179,36 @@ func (q Query) validate(checkUID func(field, uid string) error) error {
 	return nil
 }
 
+// uidAttributes lists the attribute keywords whose VR is UI, i.e. the
+// attributes for which PS3.18 §8.3.4.6 defines UID List matching. Values of
+// these attributes are UID-validated locally; every other attribute takes
+// ordinary matching values.
+var uidAttributes = map[string]bool{
+	"studyinstanceuid":                true,
+	"seriesinstanceuid":               true,
+	"sopinstanceuid":                  true,
+	"referencedsopinstanceuid":        true,
+	"frameofreferenceuid":             true,
+	"transfersyntaxuid":               true,
+	"presentationcreationinstanceuid": true,
+}
+
+// isUIDAttribute reports whether an attribute ID denotes a UID-valued
+// attribute. Both keywords and tags are recognised; an unrecognised form is
+// treated as a non-UID attribute so that a tag-based UID list still works
+// (the server validates it).
+func isUIDAttribute(attr string) bool {
+	lower := strings.ToLower(attr)
+	if uidAttributes[lower] {
+		return true
+	}
+	switch strings.ToUpper(strings.ReplaceAll(attr, ".", "")) {
+	case "0020000D", "0020000E", "00080018", "00080055", "00200052", "30060024", "0040A124":
+		return true
+	}
+	return false
+}
+
 func validateAttrID(attr string) error {
 	if !attrIDPattern.MatchString(attr) {
 		return &wado.RequestError{Field: "AttributeID", Reason: fmt.Sprintf("invalid attribute ID %q", attr)}
@@ -159,10 +216,13 @@ func validateAttrID(attr string) error {
 	return nil
 }
 
-// param is one ordered query parameter.
+// param is one ordered query parameter. list marks a parameter whose value is
+// a comma-separated list, where the bare comma is the separator the standard's
+// examples use; values of non-list parameters keep their comma escaped.
 type param struct {
-	key string
-	val string
+	key  string
+	val  string
+	list bool
 }
 
 // params renders the query parameters in a stable order: matching keys
@@ -178,31 +238,46 @@ func (q Query) params() []param {
 		if len(m.Values) > 0 {
 			v = strings.Join(m.Values, ",")
 		}
-		ps = append(ps, param{m.Attribute, v})
+		// An empty value is emitted as "{attributeID}=" (the §8.3.4.5 Empty
+		// Value Matching form); the emptyvaluematching toggle that makes it
+		// meaningful is appended below. Only a value list carries the bare
+		// comma separator.
+		ps = append(ps, param{key: m.Attribute, val: v, list: len(m.Values) > 0})
 	}
 	if len(q.IncludeFields) > 0 {
-		ps = append(ps, param{"includefield", strings.Join(q.IncludeFields, ",")})
+		// §8.3.4 specifies the literal "all"; a caller writing "ALL" or "All"
+		// means the same thing, so it is normalized rather than forwarded
+		// verbatim (a server accepting only the literal would answer 400).
+		fields := make([]string, len(q.IncludeFields))
+		for i, f := range q.IncludeFields {
+			if strings.EqualFold(f, "all") {
+				fields[i] = "all"
+				continue
+			}
+			fields[i] = f
+		}
+		ps = append(ps, param{key: "includefield", val: strings.Join(fields, ","), list: true})
 	}
 	if q.FuzzyMatching != nil {
-		ps = append(ps, param{"fuzzymatching", boolValue(*q.FuzzyMatching)})
+		ps = append(ps, param{key: "fuzzymatching", val: boolValue(*q.FuzzyMatching)})
 	}
 	if q.Limit != nil {
-		ps = append(ps, param{"limit", strconv.FormatUint(*q.Limit, 10)})
+		ps = append(ps, param{key: "limit", val: strconv.FormatUint(*q.Limit, 10)})
 	}
 	if q.Offset > 0 {
-		ps = append(ps, param{"offset", strconv.FormatUint(q.Offset, 10)})
+		ps = append(ps, param{key: "offset", val: strconv.FormatUint(q.Offset, 10)})
 	}
 	if q.EmptyValueMatching != nil {
-		ps = append(ps, param{"emptyvaluematching", boolValue(*q.EmptyValueMatching)})
+		ps = append(ps, param{key: "emptyvaluematching", val: boolValue(*q.EmptyValueMatching)})
 	}
 	if q.MultipleValueMatching != nil {
-		ps = append(ps, param{"multiplevaluematching", boolValue(*q.MultipleValueMatching)})
+		ps = append(ps, param{key: "multiplevaluematching", val: boolValue(*q.MultipleValueMatching)})
 	}
 	if len(q.OrderBy) > 0 {
-		ps = append(ps, param{"orderby", strings.Join(q.OrderBy, ",")})
+		ps = append(ps, param{key: "orderby", val: strings.Join(q.OrderBy, ","), list: true})
 	}
 	if len(q.AETitle) > 0 {
-		ps = append(ps, param{"aetitle", strings.Join(q.AETitle, ",")})
+		ps = append(ps, param{key: "aetitle", val: strings.Join(q.AETitle, ","), list: true})
 	}
 	return ps
 }

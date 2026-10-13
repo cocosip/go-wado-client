@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -205,7 +207,14 @@ func (c *Client) RetrieveRenderedInstance(ctx context.Context, studyUID, seriesU
 	}
 	ct := resp.Header.Get("Content-Type")
 	// Tolerance: some servers wrap rendered images in multipart; take the
-	// first part (see the Rendered doc for the multi-image caveat).
+	// first part (see the Rendered doc for the multi-image caveat). The test
+	// is case-insensitive because HTTP media types are (RFC 9110 §8.3) and
+	// this tolerance path exists precisely for non-conformant servers.
+	if mt, _, mErr := mime.ParseMediaType(ct); mErr == nil {
+		ct = mt
+	} else if strings.HasPrefix(strings.ToLower(ct), "multipart/") {
+		ct = strings.ToLower(ct)
+	}
 	if strings.HasPrefix(ct, "multipart/") {
 		mp, err := newMultipart(resp)
 		if err != nil {
@@ -260,7 +269,16 @@ func (c *Client) prepareRendered(ctx context.Context, u *url.URL, opts []Rendere
 	if format == "" {
 		format = "image/jpeg"
 	}
-	if cfg.format == "application/dicom" {
+	// The guard tests the effective Accept value, not just cfg.format:
+	// WithRenderedAccept is an escape hatch for the wire value, so it must not
+	// be able to smuggle in the DICOM media type the rendered transaction
+	// forbids. The comparison is on the parsed media type, so case and
+	// parameters cannot slip past it.
+	if mt, _, err := mime.ParseMediaType(format); err == nil {
+		if mt == "application/dicom" {
+			return nil, &wado.RequestError{Field: "format", Reason: "rendered media type must not be application/dicom"}
+		}
+	} else if strings.EqualFold(strings.TrimSpace(format), "application/dicom") {
 		return nil, &wado.RequestError{Field: "format", Reason: "rendered media type must not be application/dicom"}
 	}
 	for _, a := range cfg.annotations {
@@ -276,8 +294,14 @@ func (c *Client) prepareRendered(ctx context.Context, u *url.URL, opts []Rendere
 	if cfg.quality != 0 && (cfg.quality < 1 || cfg.quality > 100) {
 		return nil, &wado.RequestError{Field: "quality", Reason: "must be within 1..100"}
 	}
+	if err := validateViewport(cfg.viewport); err != nil {
+		return nil, err
+	}
+	if err := validateWindow(cfg.window, cfg.hasWindow); err != nil {
+		return nil, err
+	}
 	// §8.3.5.1.5 fixes the keyword values; legacy mode (WithLegacyParamNames)
-	// speaks a private dialect whose icccolorspace values are the gateway's
+	// speaks a private dialect whose iccocolorspace values are the gateway's
 	// own, so it passes through unvalidated.
 	if cfg.icc != "" && !c.svc.Core().LegacyParams() && !iccProfileValues[cfg.icc] {
 		return nil, &wado.RequestError{Field: "iccprofile", Reason: fmt.Sprintf("unknown value %q", cfg.icc)}
@@ -285,4 +309,43 @@ func (c *Client) prepareRendered(ctx context.Context, u *url.URL, opts []Rendere
 	u.RawQuery = cfg.query(c.svc.Core().LegacyParams()).Encode()
 
 	return c.do(ctx, u, func(req *http.Request) { req.Header.Set("Accept", format) })
+}
+
+// validateViewport rejects degenerate viewports. A zero component would make
+// the emitted "viewport=w,h" meaningless (and an explicit (0,0) is
+// indistinguishable from "unset", so it is rejected rather than silently
+// dropped); negative values are invalid per §8.3.5.1.4.
+func validateViewport(vp [2]int) error {
+	if vp == [2]int{} {
+		return nil
+	}
+	if vp[0] < 1 || vp[1] < 1 {
+		return &wado.RequestError{
+			Field:  "viewport",
+			Reason: fmt.Sprintf("columns and rows must each be >= 1, got %d,%d", vp[0], vp[1]),
+		}
+	}
+	return nil
+}
+
+// validateWindow rejects non-finite and non-positive window values: NaN/Inf
+// have no meaning in a VOI LUT window and would reach the wire verbatim
+// (some servers fail to parse them, others answer 400).
+func validateWindow(win [2]float64, set bool) error {
+	if !set {
+		return nil
+	}
+	for i, v := range win {
+		name := "center"
+		if i == 1 {
+			name = "width"
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return &wado.RequestError{Field: "window", Reason: fmt.Sprintf("%s must be a finite number, got %v", name, v)}
+		}
+	}
+	if win[1] <= 0 {
+		return &wado.RequestError{Field: "window", Reason: fmt.Sprintf("width must be > 0, got %v", win[1])}
+	}
+	return nil
 }

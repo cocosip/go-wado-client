@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -94,8 +93,6 @@ func (s Static[K]) Resolve(_ context.Context, key K) (Endpoint, error) {
 	return ep, nil
 }
 
-var placeholderRe = regexp.MustCompile(`\{[A-Za-z0-9_]+\}`)
-
 // Routes holds the service route templates of one gateway for Template.
 // Placeholders ({name}) are filled per key; an empty route means the
 // gateway does not offer that service.
@@ -108,6 +105,12 @@ type Routes struct {
 // Template returns a Resolver that fills the placeholders of both route
 // templates from vars(key) (path-escaped) — the two routes stay fully
 // independent — and joins them onto the standard base address.
+//
+// A placeholder value must be a non-empty path segment: empty values and the
+// dot segments "." / ".." are rejected, because url.PathEscape leaves dots
+// untouched and the subsequent path join would then delete or escape route
+// segments, silently addressing a different (possibly another tenant's)
+// route with the caller's credentials.
 func Template[K comparable](base string, routes Routes, vars func(K) map[string]string) ResolverFunc[K] {
 	return func(_ context.Context, key K) (Endpoint, error) {
 		vals := map[string]string{}
@@ -116,6 +119,9 @@ func Template[K comparable](base string, routes Routes, vars func(K) map[string]
 		}
 		pairs := make([]string, 0, 2*len(vals))
 		for k, v := range vals {
+			if err := checkPlaceholderValue(k, v); err != nil {
+				return Endpoint{}, err
+			}
 			pairs = append(pairs, "{"+k+"}", url.PathEscape(v))
 		}
 		rep := strings.NewReplacer(pairs...)
@@ -135,17 +141,54 @@ func Template[K comparable](base string, routes Routes, vars func(K) map[string]
 	}
 }
 
+// checkPlaceholderValue rejects values that would change the route structure
+// once substituted and path-joined.
+func checkPlaceholderValue(name, value string) error {
+	if value == "" {
+		return fmt.Errorf("multi: placeholder {%s} resolved to an empty value", name)
+	}
+	if value == "." || value == ".." {
+		return fmt.Errorf("multi: placeholder {%s} resolved to the dot segment %q, which would alter the route path", name, value)
+	}
+	// A value carrying a separator or an already-escaped dot is equally
+	// capable of changing the path once joined.
+	if strings.ContainsAny(value, "/\\") {
+		return fmt.Errorf("multi: placeholder {%s} resolved to %q, which contains a path separator", name, value)
+	}
+	return nil
+}
+
 // fillRoute replaces placeholders in one route template; empty patterns
 // stay empty (service not offered).
+//
+// The leftover check deliberately scans for any "{...}" token rather than
+// only the names the substitution recognises: a template using a character
+// the pattern does not cover would otherwise be sent verbatim as a literal
+// path segment instead of being reported as a missing value.
 func fillRoute(rep *strings.Replacer, pattern string) (string, error) {
 	if pattern == "" {
 		return "", nil
 	}
 	s := rep.Replace(pattern)
-	if m := placeholderRe.FindString(s); m != "" {
+	if m := leftoverPlaceholder(s); m != "" {
 		return "", fmt.Errorf("no value for placeholder %s in %q", m, pattern)
 	}
 	return s, nil
+}
+
+// leftoverPlaceholder returns the first unreplaced "{...}" token in s, or "".
+func leftoverPlaceholder(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' {
+			continue
+		}
+		j := strings.IndexByte(s[i:], '}')
+		if j < 0 {
+			return s[i:]
+		}
+		return s[i : i+j+1]
+	}
+	return ""
 }
 
 // Registry caches Gateways by key. The cache has no eviction: it grows by
@@ -157,12 +200,20 @@ type Registry[K comparable] struct {
 	base     *wado.Core
 	mu       sync.Mutex
 	cache    map[K]*Gateway
+	// gen increments on every Invalidate. A build that started before an
+	// invalidation carries the older generation and refuses to publish its
+	// result, so a stale Gateway can never be resurrected into the cache.
+	gen map[K]uint64
 }
 
 // NewRegistry creates a registry; defaults are the shared settings for all
 // targets (TLS/self-signed CA, timeouts, retry, logging etc.). It fails when
-// the defaults are contradictory (see wado.WithTLSClientConfig).
+// the defaults are contradictory (see wado.WithTLSClientConfig) or the
+// resolver is nil.
 func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) (*Registry[K], error) {
+	if resolver == nil {
+		return nil, errors.New("multi: nil resolver")
+	}
 	base, err := wado.NewCore(defaults...)
 	if err != nil {
 		return nil, err
@@ -171,6 +222,7 @@ func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) (*
 		resolver: resolver,
 		base:     base,
 		cache:    map[K]*Gateway{},
+		gen:      map[K]uint64{},
 	}, nil
 }
 
@@ -184,6 +236,7 @@ func NewRegistry[K comparable](resolver Resolver[K], defaults ...wado.Option) (*
 func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 	r.mu.Lock()
 	g, ok := r.cache[key]
+	gen := r.gen[key]
 	r.mu.Unlock()
 	if ok {
 		return g, nil
@@ -234,6 +287,12 @@ func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 		r.mu.Unlock()
 		return cached, nil
 	}
+	if r.gen[key] != gen {
+		// Invalidate ran while this Gateway was being built: the result is
+		// based on superseded configuration, so it must not be published.
+		r.mu.Unlock()
+		return nil, fmt.Errorf("multi: endpoint for key %v was invalidated while being resolved; retry", key)
+	}
 	r.cache[key] = g
 	r.mu.Unlock()
 	return g, nil
@@ -241,17 +300,51 @@ func (r *Registry[K]) Client(ctx context.Context, key K) (*Gateway, error) {
 
 // Invalidate drops the cached Gateway for the key (rebuild after a route
 // change or credential rotation).
+//
+// It also invalidates any build that is currently in flight for the key: such
+// a build refuses to publish its (now stale) Gateway, so the next Client call
+// rebuilds from the current configuration instead of resurrecting it.
 func (r *Registry[K]) Invalidate(key K) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.cache, key)
+	r.gen[key]++
 }
 
 // joinRoute joins an absolute route path onto the standard base address.
+//
+// The route is validated before joining: url.URL.JoinPath silently discards
+// its internal error and returns the *base* URL unchanged when the path is
+// malformed (a stray "%"), so relying on it alone would turn a configuration
+// typo into a client that quietly addresses the wrong prefix instead of
+// failing.
 func joinRoute(base, route string) (string, error) {
 	u, err := wado.ParseBaseURL(base)
 	if err != nil {
 		return "", err
 	}
-	return u.JoinPath(route).String(), nil
+	if err := validateRoute(route); err != nil {
+		return "", err
+	}
+	joined := u.JoinPath(route)
+	if joined.Path == u.Path && strings.Trim(route, "/") != "" {
+		// JoinPath dropped the route: refuse to hand back a client pointed at
+		// the bare base URL.
+		return "", fmt.Errorf("multi: route %q could not be joined onto base %q", route, base)
+	}
+	return joined.String(), nil
+}
+
+// validateRoute rejects route paths that cannot be safely joined.
+func validateRoute(route string) error {
+	if strings.Contains(route, "%") {
+		// Reject any percent sign: either it is a malformed escape (which
+		// JoinPath silently drops) or a pre-encoded value that JoinPath would
+		// double-encode. Callers should pass the route as a plain path.
+		if _, err := url.PathUnescape(route); err != nil {
+			return fmt.Errorf("multi: route %q contains an invalid percent escape", route)
+		}
+		return fmt.Errorf("multi: route %q must not contain percent-encoded characters; pass the route as a plain path", route)
+	}
+	return nil
 }

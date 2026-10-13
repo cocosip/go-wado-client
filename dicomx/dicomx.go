@@ -22,10 +22,16 @@ import (
 	"github.com/cocosip/go-wado-client/wadors"
 )
 
-// Datasets parses each DICOM part of a WADO-RS multipart response in a
-// streaming fashion. opts are passed through to the go-dicom parser (e.g.
+// Datasets parses each DICOM part of a WADO-RS multipart response, one part
+// at a time. opts are passed through to the go-dicom parser (e.g.
 // parser.WithReadOption(parser.SkipLargeTags)). Iteration stops at the first
 // part that fails to parse, yielding that error.
+//
+// Iterating the parts is streaming — no more than one part is in flight — but
+// parsing a single part is not: a WADO-RS part is a plain io.Reader with no
+// Seek, so go-dicom must buffer each element (including Pixel Data) to parse
+// it. Peak memory is therefore one whole part, and a part larger than the
+// parser's element limit fails to parse.
 func Datasets(mp *wadors.Multipart, opts ...dparser.Option) iter.Seq2[*dparser.ParseResult, error] {
 	return func(yield func(*dparser.ParseResult, error) bool) {
 		for part, err := range mp.Parts() {

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/cocosip/go-wado-client"
+	"github.com/cocosip/go-wado-client/internal/multipartx"
 )
 
 // Multipart is a streaming cursor over a WADO-RS multipart/related response:
@@ -24,10 +25,13 @@ import (
 type Multipart struct {
 	resp          *http.Response
 	mr            *multipart.Reader
+	tracker       *multipartx.Tracker
 	single        bool
 	singleCT      string
 	PartMediaType string // the type parameter of the response Content-Type (per-part media type)
 	next          int
+	done          bool
+	doneErr       error
 }
 
 func newMultipart(resp *http.Response) (*Multipart, error) {
@@ -36,15 +40,17 @@ func newMultipart(resp *http.Response) (*Multipart, error) {
 	if err != nil {
 		mt, params = ct, map[string]string{}
 	}
-	if strings.HasPrefix(mt, "multipart/") {
+	if strings.HasPrefix(strings.ToLower(mt), "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
 			_ = resp.Body.Close()
 			return nil, fmt.Errorf("wadors: multipart response without boundary: %q", ct)
 		}
+		tracker := multipartx.NewTracker(resp.Body, boundary)
 		return &Multipart{
 			resp:          resp,
-			mr:            multipart.NewReader(resp.Body, boundary),
+			mr:            multipart.NewReader(tracker, boundary),
+			tracker:       tracker,
 			PartMediaType: params["type"],
 		}, nil
 	}
@@ -53,6 +59,13 @@ func newMultipart(resp *http.Response) (*Multipart, error) {
 
 // Next returns the next part; it returns io.EOF when the response is
 // exhausted.
+//
+// A response that stops at a part boundary — the connection ends after
+// "--boundary\r\n" without the closing "--boundary--" delimiter — is reported
+// as io.ErrUnexpectedEOF rather than io.EOF. mime/multipart signals both cases
+// with the bare io.EOF sentinel, so silently treating the truncated one as
+// success would hand the caller a partial Study that looks complete and let
+// WriteToDir persist a truncated set without an error.
 func (m *Multipart) Next() (*Part, error) {
 	if m.single {
 		if m.next > 0 {
@@ -61,14 +74,25 @@ func (m *Multipart) Next() (*Part, error) {
 		m.next = 1
 		return &Part{r: m.resp.Body, ct: m.singleCT, n: 1}, nil
 	}
+	if m.done {
+		return nil, m.doneErr
+	}
 	m.next++
 	p, err := m.mr.NextRawPart()
 	if err != nil {
-		// mime/multipart may wrap io.EOF on repeated exhaustion; normalize
-		// it so callers always see plain io.EOF at the end.
+		m.done = true
 		if errors.Is(err, io.EOF) {
-			return nil, io.EOF
+			// The only clean end is the terminating delimiter having been
+			// observed on the wire; every other EOF-shaped stop is a
+			// truncated response.
+			if m.tracker.Complete() {
+				m.doneErr = io.EOF
+				return nil, io.EOF
+			}
+			m.doneErr = fmt.Errorf("wadors: multipart response truncated (no closing boundary): %w", io.ErrUnexpectedEOF)
+			return nil, m.doneErr
 		}
+		m.doneErr = err
 		return nil, err
 	}
 	ct := p.Header.Get("Content-Type")
@@ -161,9 +185,10 @@ func (m *Multipart) WriteToDir(dir string) ([]string, error) {
 	return files, nil
 }
 
-// Header returns the header of the underlying HTTP response (warning
-// headers etc.).
-func (m *Multipart) Header() http.Header { return m.resp.Header }
+// Header returns a copy of the underlying HTTP response header (warning
+// headers etc.). A copy is returned so a caller cannot mutate the response
+// metadata other readers observe, matching Rendered.Header.
+func (m *Multipart) Header() http.Header { return m.resp.Header.Clone() }
 
 // Close closes the underlying response.
 func (m *Multipart) Close() error { return m.resp.Body.Close() }

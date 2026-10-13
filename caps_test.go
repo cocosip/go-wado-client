@@ -103,6 +103,92 @@ const sampleWADLJSON = `{
   }
 }`
 
+// TestCapabilitiesWADLJSONSingleElements guards the BadgerFish single-element
+// form: the convention renders an element as a bare object when it occurs once
+// and as an array when it repeats, so a Capabilities Description declaring one
+// resource, one method or one representation — the common shape — must parse
+// rather than fail with an unmarshal error.
+func TestCapabilitiesWADLJSONSingleElements(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "single resource and single method as objects",
+			body: `{"application":{"resources":{"@base":"https://srv.example.com/",` +
+				`"resource":{"@path":"/studies","method":{"@name":"GET"}}}}}`,
+		},
+		{
+			name: "single resource, method array",
+			body: `{"application":{"resources":{"@base":"https://srv.example.com/",` +
+				`"resource":{"@path":"/studies","method":[{"@name":"GET"}]}}}}`,
+		},
+		{
+			name: "resource array, single method object",
+			body: `{"application":{"resources":{"@base":"https://srv.example.com/",` +
+				`"resource":[{"@path":"/studies","method":{"@name":"GET"}}]}}}`,
+		},
+		{
+			name: "single representation object",
+			body: `{"application":{"resources":{"resource":[{"@path":"/studies","method":[` +
+				`{"@name":"GET","response":{"representation":{"@mediaType":"application/dicom+json"}}}]}]}}}`,
+		},
+		{
+			name: "nested single child resource object",
+			body: `{"application":{"resources":{"resource":{"@path":"/studies",` +
+				`"method":{"@name":"GET"},` +
+				`"resource":{"@path":"{StudyInstanceUID}","method":{"@name":"GET"}}}}}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newCapabilitiesServer(t, http.StatusOK, MediaTypeWADLJSON, tc.body, "")
+			s := newTestService(t, srv.URL)
+			caps, err := s.Capabilities(context.Background())
+			if err != nil {
+				t.Fatalf("Capabilities: %v", err)
+			}
+			if caps.WADL == nil {
+				t.Fatal("WADL = nil, want a parsed description")
+			}
+			if !caps.WADLSupports("/studies", "GET") {
+				t.Errorf("WADLSupports(/studies, GET) = false; resources = %+v", caps.WADL.Resources)
+			}
+		})
+	}
+
+	// The nested single-child case must also flatten the child path.
+	srv, _ := newCapabilitiesServer(t, http.StatusOK, MediaTypeWADLJSON,
+		`{"application":{"resources":{"resource":{"@path":"/studies",`+
+			`"method":{"@name":"GET"},`+
+			`"resource":{"@path":"{StudyInstanceUID}","method":{"@name":"GET"}}}}}}`, "")
+	s := newTestService(t, srv.URL)
+	caps, err := s.Capabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.WADLSupports("/studies/{StudyInstanceUID}", "GET") {
+		t.Errorf("child path not flattened; resources = %+v", caps.WADL.Resources)
+	}
+}
+
+// TestCapabilitiesWADLJSONNotADocument covers the shapes that must not be
+// mistaken for a WADL document.
+func TestCapabilitiesWADLJSONNotADocument(t *testing.T) {
+	for _, body := range []string{`{}`, `{"application":{}}`, `{"application":{"resources":null}}`} {
+		srv, _ := newCapabilitiesServer(t, http.StatusOK, MediaTypeWADLJSON, body, "")
+		s := newTestService(t, srv.URL)
+		caps, err := s.Capabilities(context.Background())
+		if err == nil {
+			t.Errorf("body %s: err = nil, want a not-a-WADL error", body)
+			continue
+		}
+		if caps != nil {
+			t.Errorf("body %s: caps = %+v, want nil", body, caps)
+		}
+	}
+}
+
 func TestCapabilitiesAllowHeader(t *testing.T) {
 	srv, got := newCapabilitiesServer(t, http.StatusOK, "", "", "get, post , GET")
 	s := newTestService(t, srv.URL)

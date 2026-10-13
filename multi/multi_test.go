@@ -28,7 +28,15 @@ func mustRegistry[K comparable](t *testing.T, resolver Resolver[K], defaults ...
 	return reg
 }
 
-const testTenant = "hosp-a"
+const (
+	testTenant = "hosp-a"
+	// Shared literals reused across the multi tests (goconst).
+	testGWBase        = "https://gw.example.com"
+	testPlaceholder   = "hospitalCode"
+	testSimpleBase    = "https://h.cn"
+	testSimpleRoute   = "/a/b"
+	testSimpleRouteOK = "https://h.cn/a/b"
+)
 
 // routeKey is the business-defined composite key (tenant + business line).
 type routeKey struct{ Tenant, Biz string }
@@ -119,7 +127,7 @@ func TestBaseJoining(t *testing.T) {
 	cases := []struct {
 		base, route, want string
 	}{
-		{"https://h.cn", "/a/b", "https://h.cn/a/b"},
+		{testSimpleBase, testSimpleRoute, testSimpleRouteOK},
 		{"https://h.cn/", "/a/b", "https://h.cn/a/b"},
 		{"https://h.cn:8443", "/api/wado/H1/wado-rs", "https://h.cn:8443/api/wado/H1/wado-rs"},
 		{"https://h.cn/static", "/a", "https://h.cn/static/a"},
@@ -145,7 +153,7 @@ func TestTemplateFillsBothRoutes(t *testing.T) {
 		RS:  "/api/wado/{hospitalCode}/{businessCode}/wado-rs",
 		URI: "/api/wado/{hospitalCode}/{businessCode}/wado-uri",
 	}, func(k routeKey) map[string]string {
-		return map[string]string{"hospitalCode": k.Tenant, "businessCode": k.Biz}
+		return map[string]string{testPlaceholder: k.Tenant, "businessCode": k.Biz}
 	})
 
 	ep, err := res.Resolve(context.Background(), routeKey{Tenant: "H1", Biz: "ct"})
@@ -306,7 +314,7 @@ func TestRegistryResolveOutsideLock(t *testing.T) {
 		if key == "slow" {
 			<-release
 		}
-		return Endpoint{Base: "https://gw.example.com", RSRoute: "/rs"}, nil
+		return Endpoint{Base: testGWBase, RSRoute: "/rs"}, nil
 	}))
 
 	// Warm the cache for "fast" before "slow" starts resolving.
@@ -411,7 +419,7 @@ func TestQidoRoute(t *testing.T) {
 	res := Template("https://unused", Routes{
 		QIDO: "/api/qido/{hospitalCode}",
 	}, func(k routeKey) map[string]string {
-		return map[string]string{"hospitalCode": k.Tenant}
+		return map[string]string{testPlaceholder: k.Tenant}
 	})
 	ep, err := res.Resolve(context.Background(), routeKey{Tenant: testTenant, Biz: "ct"})
 	if err != nil {

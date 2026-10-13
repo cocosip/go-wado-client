@@ -16,10 +16,16 @@ import (
 )
 
 const (
-	testPatientID = "11235813"
-	attrPatientID  = "PatientID"
-	testStudyUID = "1.2.3"
+	testPatientID    = "11235813"
+	attrPatientID    = "PatientID"
+	testStudyUID     = "1.2.3"
 	fieldAttributeID = "AttributeID"
+	// Shared literals reused across the qido tests (goconst).
+	attrPatientName = "PatientName"
+	attrStudyUID    = "StudyInstanceUID"
+	testSeriesUID   = "1.2.4"
+	fieldTagA       = "00081048"
+	fieldTagB       = "00081060"
 )
 
 func u64(v uint64) *uint64 { return &v }
@@ -70,7 +76,7 @@ func TestEncodeQuery(t *testing.T) {
 			name: "match by keyword, includefield list, limit",
 			q: Query{
 				Match:         []Match{{Attribute: attrPatientID, Value: testPatientID}},
-				IncludeFields: []string{"00081048", "00081060"},
+				IncludeFields: []string{fieldTagA, fieldTagB},
 				Limit:         u64(25),
 			},
 			want: "PatientID=" + testPatientID + "&includefield=00081048,00081060&limit=25",
@@ -85,14 +91,14 @@ func TestEncodeQuery(t *testing.T) {
 		{
 			name: "open-ended range and wildcard",
 			q: Query{
-				Match: []Match{{Attribute: "StudyDate", Value: "20130509-"}, {Attribute: "PatientName", Value: "SMITH^JOHN*"}},
+				Match: []Match{{Attribute: "StudyDate", Value: "20130509-"}, {Attribute: attrPatientName, Value: "SMITH^JOHN*"}},
 			},
 			want: "StudyDate=20130509-&PatientName=SMITH%5EJOHN%2A",
 		},
 		{
 			name: "uid list matching keeps the comma bare",
 			q: Query{
-				Match: []Match{{Attribute: "0020000E", Values: []string{testStudyUID, "1.2.4"}}},
+				Match: []Match{{Attribute: "0020000E", Values: []string{testStudyUID, testSeriesUID}}},
 			},
 			want: "0020000E=1.2.3,1.2.4",
 		},
@@ -195,10 +201,10 @@ func TestQueryValidation(t *testing.T) {
 			name: "match with both value forms",
 			search: func() error {
 				_, err := c.SearchStudies(ctx, Query{Match: []Match{{
-					Attribute: "StudyInstanceUID", Value: testStudyUID, Values: []string{"1.2.4"}}}})
+					Attribute: attrStudyUID, Value: testStudyUID, Values: []string{"1.2.4"}}}})
 				return err
 			},
-			field: "StudyInstanceUID",
+			field: attrStudyUID,
 		},
 		{
 			name: "match without value",
@@ -212,7 +218,7 @@ func TestQueryValidation(t *testing.T) {
 			name: "uid list with non-UID entry",
 			search: func() error {
 				_, err := c.SearchStudies(ctx, Query{Match: []Match{{
-					Attribute: "SeriesInstanceUID", Values: []string{"1.2.3", "not a uid"}}}})
+					Attribute: "SeriesInstanceUID", Values: []string{testStudyUID, "not a uid"}}}})
 				return err
 			},
 			field: "SeriesInstanceUID",
@@ -276,7 +282,7 @@ func TestSearchStudies(t *testing.T) {
 	}
 	res, err := c.SearchStudies(context.Background(), Query{
 		Match:         []Match{{Attribute: attrPatientID, Value: testPatientID}},
-		IncludeFields: []string{"00081048", "00081060"},
+		IncludeFields: []string{fieldTagA, fieldTagB},
 		FuzzyMatching: bp(false),
 		Limit:         u64(25),
 	})
@@ -336,7 +342,7 @@ func TestSearchResources(t *testing.T) {
 		{
 			name: "series instances",
 			search: func(c *Client) error {
-				_, err := c.SearchSeriesInstances(context.Background(), testStudyUID, "1.2.4", Query{})
+				_, err := c.SearchSeriesInstances(context.Background(), testStudyUID, testSeriesUID, Query{})
 				return err
 			},
 			path: "/dicomweb/studies/" + testStudyUID + "/series/1.2.4/instances",
@@ -384,7 +390,7 @@ func TestSearchInvalidScopedUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.SearchSeries(context.Background(), testStudyUID + "/../x", Query{}); !errors.Is(err, wado.ErrInvalidUID) {
+	if _, err := c.SearchSeries(context.Background(), testStudyUID+"/../x", Query{}); !errors.Is(err, wado.ErrInvalidUID) {
 		t.Fatalf("err = %v, want ErrInvalidUID", err)
 	}
 }

@@ -1,7 +1,7 @@
 # go-wado-client 设计方案
 
-> 目标：基于 Go 1.26 实现 DICOM WADO 客户端，支持 **WADO-RS** 与 **WADO-URI** 两种检索标准。
-> 状态：设计方案（待评审），未开始编码。
+> 目标：基于 Go 1.26 实现 DICOM WADO 客户端，支持 **WADO-RS** / **WADO-URI** / **QIDO-RS** 三种检索与查询标准。
+> 状态：**已实现**（M1–M5 完成；§5 的 API 草案已按实际实现修订，见 §9）。
 > 标准依据：DICOM PS3.18（Web Services），调研基于 current 版（2026d），并同时考虑现网已部署服务器的经典行为（≤2022 版）。
 
 ---
@@ -86,21 +86,23 @@ PS3.18 在 2023 年重组过章节，现行结构：第 8 章 = DICOM Web 服务
 ### D1. URL 组装：可配置 BaseURL + 固定标准路径段（对应核心业务约束）
 
 ```go
-c, err := wado.NewClient("https://pacs.hosp-a.cn/api/gateway/H0001")   // 前缀任意，业务层给
-c, err := wado.NewClient("https://10.20.30.40:8443/dicomweb")
+// 实现说明：根包不提供 NewClient——三个事务各有构造器，共享 wado.Core 底座。
+c, err := wadors.New("https://pacs.hosp-a.cn/api/gateway/H0001")   // 前缀任意，业务层给
+u, err := wadouri.New("https://pacs.hosp-a.cn/api/gateway/H0001/wado-uri")
+q, err := qido.New("https://pacs.hosp-a.cn/api/gateway/H0001")
 ```
 
-- `NewClient` 解析并规范化 BaseURL：校验 scheme/host、去掉尾部 `/`，保留中间全部前缀段。
+- 构造器解析并规范化 BaseURL：校验 scheme/host、清理 `./` 与 `../`、去掉尾部 `/`，保留中间全部前缀段。
 - 资源 URL 一律用 `(*url.URL).JoinPath("studies", studyUID, "series", seriesUID, ...)` 拼接——自动处理斜杠合并、`./`、`../` 清理与段转义。
 - **前缀对库完全不透明**：库不解析、不假设 BaseURL 的内部结构——医院编码在第几段、段名今天叫 `hospitalCode` 明天叫 `orgId`、中间多一段版本号，都是业务侧的知识与数据，不是库的代码。契约只有一条：**BaseURL 以标准资源路径（`studies/...`）的直接父级结尾**。
 - **UID 白名单校验**（进入路径前强制）：非空、总长 ≤ 64、仅 `[0-9.]`、无空组件、组件无前导零（单独 `0` 除外）。作用：① 防路径注入；② 把服务器端 400 提前为客户端错误，附带清晰报错。提供 `WithLenientUID()` 逃生门（个别私有网关接受非标 UID）。
 - **多医院共享一个 Client 底座（Fork）**：`Client` 实例只是配置载体，不持有连接；连接池/TLS 会话都在共享的 `*http.Transport` 上，因此多实例零额外开销。针对"同一网关按医院/租户/业务等标识区分前缀"的场景（标识语义与库无关）：
 
   ```go
-  gw, _ := wado.NewClient("https://gw.example.com/api", opts...)  // 底座：只定传输/鉴权/日志，前缀不完整没关系
+  core, _ := wado.NewCore(opts...)                                  // 底座：只定传输/鉴权/日志
 
-  h1, _ := gw.Fork("https://gw.example.com/api/imaging/H0001/dicomweb") // 共享底座全部装配，仅换 BaseURL
-  h2, _ := gw.Fork("https://gw.example.com/api/imaging/H0002/dicomweb", wado.WithBasicAuth(...)) // 可按院覆盖鉴权
+  h1, _ := wadors.NewWithCore(core, "https://gw.example.com/api/imaging/H0001/dicomweb") // 共享底座，仅换 BaseURL
+  h2, _ := core.Fork(wado.WithBasicAuth(...))                        // 可按院覆盖鉴权，再 NewWithCore
   ```
 
   Fork 是浅拷贝 + 换 BaseURL（+ 可选覆盖项），不做任何网络操作。**刻意不做**"每次调用传 hospitalCode"的 API：医院码与 StudyUID 配错是取错数据的隐蔽事故，"先按医院拿到 Client、再检索"的两步式把绑定关系固定在一处。
@@ -110,8 +112,8 @@ c, err := wado.NewClient("https://10.20.30.40:8443/dicomweb")
 标准未定义 WADO-URI 的路径，且同一医院 RS 与 URI 端点常不同（如 RS 在 `/dicom-web`，URI 在 `/wado`）：
 
 ```go
-wado.WithWADOURIPath("/wado")                          // 相对 BaseURL 同 host（默认值，可改）
-wado.WithWADOURIPath("https://gw.hosp-b.cn/wado-uri")  // 也允许完整 URL（跨网关）
+// 实现说明：URI 端点整体传给 wadouri.New；跨网关直接给完整 URL。
+wadouri.New("https://gw.hosp-b.cn/wado-uri")
 ```
 
 请求 = 该端点 + `url.Values.Encode()` 生成的查询串，值全量转义。
@@ -146,8 +148,10 @@ wado.WithHTTPClient(*http.Client)                     // 整体接管（含代�
 wado.WithTLSClientConfig(*tls.Config)                 // 医院自签 CA 常见，单独给快捷方式
                                                       // 与 WithHTTPClient 组合时仅支持 nil 或 *http.Transport，
                                                       // 包装型 RoundTripper 无法注入 → 构造期直接报错
-wado.WithTransportWrapper(func(rt http.RoundTripper) http.RoundTripper) // 接 otel/metrics，不硬依赖
-wado.WithLogger(Logger)                               // 极简接口；nil = 静默
+wado.WithRequestEditor(func(*http.Request) error)     // 私有签名头（包装 RoundTripper 请用 WithHTTPClient）
+wado.WithLogger(*slog.Logger)                         // 不注入则完全静默（不回退 slog.Default）
+wado.WithMaxIdleConnsPerHost(n)                     // 空闲连接池（Fork 会继承）
+wado.WithBulkDataHostPolicy(p)                      // BulkDataURI 跨主机策略
 ```
 
 ### D6. 参数命名兼容：标准默认 + 退役方言显式启用
@@ -177,7 +181,7 @@ GET 幂等，`WithRetry(RetryPolicy{MaxAttempts, InitialBackoff, MaxBackoff, Jit
 ### D9. BulkDataURI 相对路径解析（标准三种形式）
 
 ```go
-ResolveBulkDataURI(metaRequestURL *url.URL, uri string) (*url.URL, error)
+ResolveReference(base *url.URL, ref string) (*url.URL, error)
 // 绝对 URI                → 原样
 // "/dicomweb/studies/..." → 取元数据请求 URL 的 scheme+host，拼绝对路径
 // "./bulkdata/00282000"   → 相对【发起元数据请求的那个路径】解析
@@ -186,7 +190,7 @@ ResolveBulkDataURI(metaRequestURL *url.URL, uri string) (*url.URL, error)
 
 ### D10. 元数据（application/dicom+json）模型
 
-独立子包 `dicomjson`，按 VR 提供类型化取值，不引入 DICOM 解析库：
+**已按实现调整**：不再自研 dicomjson 模型（初稿的 Element/Dataset 已删除，见 §9.4）。元数据解析委托 go-dicom 的 serialization.FromJSON，返回 *dataset.Dataset；internal/dicomjson 只保留流式 item 解码与 BulkDataURI 绝对化：
 
 ```go
 type Element struct {
@@ -229,7 +233,7 @@ github.com/cocosip/go-wado-client/    (module github.com/cocosip/go-wado-client,
 ### 5.1 WADO-RS
 
 ```go
-func NewClient(baseURL string, opts ...Option) (*Client, error)
+func wadors.New(baseURL string, opts ...wado.Option) (*Client, error)   // 另有 wadouri.New / qido.New
 
 // —— 实例检索（multipart 流式）——
 func (c *Client) RetrieveStudy(ctx context.Context, studyUID string, opts ...RetrieveOption) (*Multipart, error)
@@ -237,9 +241,10 @@ func (c *Client) RetrieveSeries(ctx context.Context, studyUID, seriesUID string,
 func (c *Client) RetrieveInstance(ctx context.Context, studyUID, seriesUID, sopUID string, opts ...RetrieveOption) (*Multipart, error)
 
 // —— 元数据（dicom+json）——
-func (c *Client) StudyMetadata(ctx context.Context, studyUID string, opts ...MetaOption) ([]dicomjson.Dataset, error)
-func (c *Client) SeriesMetadata(ctx context.Context, studyUID, seriesUID string, opts ...MetaOption) ([]dicomjson.Dataset, error)
-func (c *Client) InstanceMetadata(ctx context.Context, studyUID, seriesUID, sopUID string, opts ...MetaOption) (*dicomjson.Dataset, error)
+func (c *Client) StudyMetadata(ctx context.Context, studyUID string, opts ...RetrieveOption) ([]*dataset.Dataset, error)
+func (c *Client) SeriesMetadata(ctx context.Context, studyUID, seriesUID string, opts ...RetrieveOption) ([]*dataset.Dataset, error)
+func (c *Client) InstanceMetadata(ctx context.Context, studyUID, seriesUID, sopUID string, opts ...RetrieveOption) (*dataset.Dataset, error)
+// 另有 StudyMetadataStream / SeriesMetadataStream 流式变体
 
 // —— 帧与渲染 ——
 func (c *Client) RetrieveFrames(ctx context.Context, studyUID, seriesUID, sopUID string, frames []int, opts ...RetrieveOption) (*Multipart, error)
@@ -271,25 +276,26 @@ func (p *Part) Read(b []byte) (int, error)
 ### 5.3 WADO-URI
 
 ```go
-type URIRequest struct {
+// 实现说明：类型名为 Request / Response（不是 URIRequest / URIResponse）。
+type Request struct {
     StudyUID, SeriesUID, ObjectUID string // 必填
 
     ContentType      string   // "" = application/dicom（DICOM 实例）；填 image/* 走渲染事务
     TransferSyntax   string   // 仅 DICOM 实例
     Charset          string
-    Anonymize        bool     // 仅 DICOM 实例（§8.1）
-    Annotation       []string // "patient","technique"；仅渲染（§8.2）
+    Anonymize        bool     // 仅 DICOM 实例（§9.4.1.2.1）
+    Annotation       []string // "patient","technique"；仅渲染（§9.5.1.2.2）
     FrameNumber      int      // 渲染
     ImageQuality     int      // 渲染 1-100
-    Rows, Columns    int      // 成对
+    Rows, Columns    int      // 成对（§9.5.1.2.4）
     Region           *[4]float64
     WindowCenter, WindowWidth *float64 // 成对，与 Presentation* 互斥
     PresentationUID, PresentationSeriesUID string // 成对
-    Extra            url.Values // 透传
+    Extra            url.Values // 透传（覆盖同名标准参数）
 }
-func (c *Client) RetrieveURIInstance(ctx context.Context, req URIRequest) (*URIResponse, error)
+func (c *Client) Retrieve(ctx context.Context, req Request) (*Response, error)
 
-type URIResponse struct {
+type Response struct {
     ContentType string        // "application/dicom" 或 image/*
     Body        io.ReadCloser // 单段流
 }
@@ -407,7 +413,7 @@ res, _ := g.URI.Retrieve(ctx, wadouri.Request{
    - WADO-URI 参数编码与本地成对/互斥校验。
    - multipart 解析：自造报文（多 part、gzip、chunked、part 头缺失、畸形 boundary）。
    - BulkDataURI 三种形式解析。
-2. **集成测试（httptest 模拟 PACS）**：`internal/testutil` 提供可编程假服务器（按 UID 生成小 DICOM 文件、dicom+json、帧、渲染 PNG、错误码注入），全链路断言。
+2. **集成测试（httptest 模拟 PACS）**：各包内的可编程假服务器（`wadors/testutil_test.go`、`qido` 的 `newCaptureServer` 等）（按 UID 生成小 DICOM 文件、dicom+json、帧、渲染 PNG、错误码注入），全链路断言。
 3. **真机兼容性（可选，`//go:build conformance`）**：对 Orthanc（DICOMweb 插件）与 dcm4chee-arc 的 docker 实例跑冒烟，作为兼容性回归靶机。
 
 ## 7. 实施里程碑
@@ -420,7 +426,7 @@ res, _ := g.URI.Retrieve(ctx, wadouri.Request{
 | M4 | WADO-URI 全量参数与本地校验 | 参数编码快照测试 |
 | M5 | 重试、日志/追踪插拔、multi 泛型注册表、真机兼容冒烟 | README + 示例 |
 
-后续可自然扩展：QIDO-RS（查询）、STOW-RS（上传）复用同一 Client/传输层。
+后续可自然扩展：STOW-RS（上传）复用同一 Service/传输层。QIDO-RS 已实现（§7.1、`qido/`）。
 
 ### 7.1 扩展一：QIDO-RS 与能力发现（已实现，2026-10）
 
@@ -496,7 +502,7 @@ res, _ := g.URI.Retrieve(ctx, wadouri.Request{
 
 ## 9. 实现状态与相对初稿的设计变更
 
-M1–M4 + M5 核心已全部实现，46 个单元/httptest 测试全绿（`go vet` / `gofmt` 干净）。
+M1–M5 核心已全部实现，单元/httptest 测试全绿（`go vet` / `gofmt` / `golangci-lint` 干净）。
 实现过程中按评审意见做了如下调整（均已在代码与 README 落实）：
 
 1. **双客户端拆分**：WADO-RS 与 WADO-URI 是两个标准，拆为 `wadors.Client` 与
@@ -549,8 +555,7 @@ M1–M4 + M5 核心已全部实现，46 个单元/httptest 测试全绿（`go ve
 8. **代码走查修复（2026-10 第四轮，逐版核对 PS3.18：2016d / 2017c / 2019a / 现行）**：
    - **协议一致性**：
      - 参数命名默认翻转为**现行标准命名**：WADO-RS 渲染 `annotation`/`window`/`iccprofile`（2016d 入标即如此，`annotations`/`windowcenter`/`windowwidth`/`icccolorspace` 系退役 WADO-WS 方言、从未入标）、WADO-URI 匿名化 `anonymize`（2019a 起取代 `anonymity`）；旧方言改经 `WithLegacyParamNames` 显式启用（替代 `WithModernParamNames`，D6 重写）；
-     - WADO-URI 补 `region`↔Presentation State 互斥的本地校验（§8.2.4：region 不得与 Presentation Object UID 同现）；
-     - WADO-URI `rows`/`columns` 取消强制成对（§8.2.2：二者各自独立可选，只给一个时服务器按保持纵横比推算），查询编码相应改为各自出现；
+     - WADO-URI 本地校验逐版核对 PS3.18（第五轮走查更正）：`rows`/`columns` **仍按 §9.5.1.2.4 强制成对**（"If either parameter is present, both shall be present"），`region` 与 Presentation State **可以同现**（§9.5.1.2.7 明确允许，此时其余可选参数仅限 annotation/imageQuality/region/rows/columns），`transferSyntax` 仅限 `application/dicom`；
      - WADO-RS 字符集协商改发标准的 `charset` 查询参数（§6.5），移除非标准的 `Accept-Charset` 头。
    - **性能**：
      - 元数据新增流式迭代器 `StudyMetadataStream`/`SeriesMetadataStream`（`MetadataStream.Next`/`Close`），逐 part 解析、峰值内存为一个 part 而非整包；`StudyMetadata` 等聚齐形式改建于其上；

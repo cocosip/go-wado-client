@@ -23,7 +23,8 @@ Services) transactions:
   Description (§8.9.4: `application/vnd.sun.wadl+xml` and its JSON
   representation) parsed into a uniform model. The URI Service is not
   required to implement the transaction, so its client surfaces gateways
-  without it as 404/405 errors.
+  without it as 404 errors, or 405/501
+  (`wado.IsCapabilitiesUnsupported`).
 
 DICOM processing (parsing, dicom+json, pixel codecs) is delegated to
 [cocosip/go-dicom](https://github.com/cocosip/go-dicom) and
@@ -116,10 +117,11 @@ if resp.IsDICOM() { io.Copy(f, resp.Body) }
 Local validation rejects up front everything the standard says a server must
 answer with 400: the window pair / presentation pair and their mutual
 exclusions, `frameNumber` combined with a presentation state, `rows` /
-`columns` only as a pair, the rendered-only parameters (frameNumber,
+`columns` only as a pair (§9.5.1.2.4), the rendered-only parameters (frameNumber,
 imageQuality, rows/columns, region, annotation) combined with
-`application/dicom`, the DICOM-only `anonymize` switch combined with a
-rendered content type, invalid media types, and UID whitelist violations.
+`application/dicom`, the DICOM-only `anonymize` and `transferSyntax` switches
+combined with a rendered content type, invalid media types, and UID whitelist
+violations.
 
 ## QIDO-RS (search)
 
@@ -259,12 +261,14 @@ Notes:
 
 ## Runnable examples
 
-Complete, runnable walkthroughs live under [`examples/`](examples/) — they
-cover every implemented method of both clients. Point them at your gateway
-(only the retrieval calls talk on the network):
+Complete, runnable walkthroughs live under [`examples/`](examples/) and
+exercise the main retrieval paths of every client. `Capabilities` and the
+`*MetadataStream` variants have no example of their own; see the doc comments
+for those. Point the examples at your gateway (only the retrieval calls talk
+on the network):
 
 ```sh
-# WADO-RS: all 13 client methods — study/series/instance retrieval,
+# WADO-RS: 15 client methods — study/series/instance retrieval,
 # metadata, frames, rendered images, bulk data, options, error handling
 go run ./examples/wadors -base https://gw.example.com/api/wado/H0001/wado-rs -study <studyUID>
 

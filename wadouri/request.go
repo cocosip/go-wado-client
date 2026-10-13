@@ -2,6 +2,7 @@ package wadouri
 
 import (
 	"fmt"
+	"math"
 	"mime"
 	"net/url"
 	"strconv"
@@ -28,6 +29,13 @@ const (
 	fieldRegion = "Region"
 	// fieldFrameNumber is the error field name of the frameNumber parameter.
 	fieldFrameNumber = "FrameNumber"
+	// fieldRowsColumns is the error field name of the rows/columns pair.
+	fieldRowsColumns = "Rows/Columns"
+	// fieldWindowCenter is the error field name of the window pair.
+	fieldWindowCenter = "WindowCenter"
+	// mediaTypeDICOM is the DICOM instance media type that selects the
+	// Retrieve DICOM Instance transaction.
+	mediaTypeDICOM = "application/dicom"
 )
 
 // Request holds the WADO-URI retrieval parameters.
@@ -103,7 +111,7 @@ func (r Request) dicomContentType() (bool, error) {
 	if err != nil {
 		return false, &wado.RequestError{Field: "ContentType", Reason: fmt.Sprintf("not a valid media type: %v", err)}
 	}
-	return mt == "application/dicom", nil
+	return mt == mediaTypeDICOM, nil
 }
 
 // validateUIDs checks the mandatory identification triple and the optional
@@ -156,10 +164,10 @@ func (r Request) validateWindowAndPresentation(isDICOM bool) error {
 	hasWindow := r.WindowCenter != nil || r.WindowWidth != nil
 	hasPres := r.PresentationUID != "" || r.PresentationSeriesUID != ""
 	if hasWindow && hasPres {
-		return &wado.RequestError{Field: "WindowCenter", Reason: "windowing and presentation state are mutually exclusive"}
+		return &wado.RequestError{Field: fieldWindowCenter, Reason: "windowing and presentation state are mutually exclusive"}
 	}
 	if hasWindow && isDICOM {
-		return &wado.RequestError{Field: "WindowCenter", Reason: "windowing requires a rendered contentType"}
+		return &wado.RequestError{Field: fieldWindowCenter, Reason: "windowing requires a rendered contentType"}
 	}
 	return nil
 }
@@ -172,49 +180,103 @@ func (r Request) validateWindowAndPresentation(isDICOM bool) error {
 // presentation-state combination rules (PS3.18 §9.5.1.2.7), and the remaining
 // value ranges.
 func (r Request) validateRenderedValues(isDICOM bool) error {
+	if err := r.validateTransactionDirection(isDICOM); err != nil {
+		return err
+	}
+	if err := r.validateRenderedExclusions(isDICOM); err != nil {
+		return err
+	}
+	if err := r.validatePairsAndRanges(); err != nil {
+		return err
+	}
+	return r.validateRenderedRanges()
+}
+
+// validateTransactionDirection enforces the parameters that belong to the
+// DICOM instance transaction only (anonymize, transferSyntax).
+func (r Request) validateTransactionDirection(isDICOM bool) error {
 	if r.Anonymize && !isDICOM {
 		return &wado.RequestError{Field: "Anonymize", Reason: "requires the application/dicom contentType"}
 	}
-	if isDICOM {
-		switch {
-		case r.FrameNumber != 0:
-			return &wado.RequestError{Field: fieldFrameNumber, Reason: reasonNeedsRendered}
-		case r.ImageQuality != 0:
-			return &wado.RequestError{Field: "ImageQuality", Reason: reasonNeedsRendered}
-		case r.Rows != 0 || r.Columns != 0:
-			return &wado.RequestError{Field: "Rows/Columns", Reason: reasonNeedsRendered}
-		case r.Region != nil:
-			return &wado.RequestError{Field: fieldRegion, Reason: reasonNeedsRendered}
-		case len(r.Annotation) > 0:
-			// PS3.18 §9.5.1.2.2: "It shall not be present if contentType is
-			// application/dicom".
-			return &wado.RequestError{Field: "Annotation", Reason: reasonNeedsRendered}
-		}
+	// PS3.18 §9.4.1.2.2 defines transferSyntax for the DICOM instance
+	// transaction only; with a rendered contentType it has no meaning (the
+	// mirror image of the anonymize rule above).
+	if r.TransferSyntax != "" && !isDICOM {
+		return &wado.RequestError{Field: "TransferSyntax", Reason: "requires the application/dicom contentType"}
 	}
+	return nil
+}
+
+// validateRenderedExclusions rejects the rendered-only parameters when the
+// request selects the DICOM instance transaction (PS3.18 §9.5.1.2: they apply
+// to image retrieval only, so a server would answer 400).
+func (r Request) validateRenderedExclusions(isDICOM bool) error {
+	if !isDICOM {
+		return nil
+	}
+	switch {
+	case r.FrameNumber != 0:
+		return &wado.RequestError{Field: fieldFrameNumber, Reason: reasonNeedsRendered}
+	case r.ImageQuality != 0:
+		return &wado.RequestError{Field: "ImageQuality", Reason: reasonNeedsRendered}
+	case r.Rows != 0 || r.Columns != 0:
+		return &wado.RequestError{Field: fieldRowsColumns, Reason: reasonNeedsRendered}
+	case r.Region != nil:
+		return &wado.RequestError{Field: fieldRegion, Reason: reasonNeedsRendered}
+	case len(r.Annotation) > 0:
+		// PS3.18 §9.5.1.2.2: "It shall not be present if contentType is
+		// application/dicom".
+		return &wado.RequestError{Field: "Annotation", Reason: reasonNeedsRendered}
+	}
+	return nil
+}
+
+// validatePairsAndRanges enforces the rows/columns pair and its sign, the
+// presentation-state combination rules and the frame-number range.
+func (r Request) validatePairsAndRanges() error {
 	// PS3.18 §9.5.1.2.4: "If either parameter is present, both shall be
 	// present."
 	if (r.Rows != 0) != (r.Columns != 0) {
-		return &wado.RequestError{Field: "Rows/Columns", Reason: reasonSetTogether}
+		return &wado.RequestError{Field: fieldRowsColumns, Reason: reasonSetTogether}
 	}
-	hasPres := r.PresentationUID != "" || r.PresentationSeriesUID != ""
+	// A negative value is "present" for the pairing rule above but is dropped
+	// by the encoder (which emits only > 0), which would silently send a
+	// one-sided viewport — exactly what the pair rule forbids. Reject it.
+	if r.Rows < 0 || r.Columns < 0 {
+		return &wado.RequestError{Field: fieldRowsColumns, Reason: "must be >= 1 when set"}
+	}
 	// PS3.18 §9.5.1.2.7: with a Presentation State the only other optional
 	// parameters that may be present are annotation, imageQuality, region
 	// and rows/columns — not frameNumber (windowing is already excluded by
 	// validateWindowAndPresentation).
-	if hasPres && r.FrameNumber != 0 {
+	if (r.PresentationUID != "" || r.PresentationSeriesUID != "") && r.FrameNumber != 0 {
 		return &wado.RequestError{Field: fieldFrameNumber, Reason: "must not be combined with a presentation state"}
 	}
+	if r.FrameNumber < 0 {
+		return &wado.RequestError{Field: fieldFrameNumber, Reason: "must be >= 1"}
+	}
+	return nil
+}
+
+// validateRenderedRanges checks the remaining value ranges: the region bounds
+// (§9.5.1.2.5: normalized 0..1), the quality range, the finiteness of the
+// window pair (NaN/Inf would reach the wire verbatim) and the annotation
+// kinds.
+func (r Request) validateRenderedRanges() error {
 	if r.Region != nil {
 		x1, y1, x2, y2 := r.Region[0], r.Region[1], r.Region[2], r.Region[3]
 		if !(x1 >= 0 && x1 < x2 && x2 <= 1) || !(y1 >= 0 && y1 < y2 && y2 <= 1) {
 			return &wado.RequestError{Field: fieldRegion, Reason: "require 0<=xmin<xmax<=1 and 0<=ymin<ymax<=1"}
 		}
 	}
-	if r.FrameNumber < 0 {
-		return &wado.RequestError{Field: fieldFrameNumber, Reason: "must be >= 1"}
-	}
 	if r.ImageQuality != 0 && (r.ImageQuality < 1 || r.ImageQuality > 100) {
 		return &wado.RequestError{Field: "ImageQuality", Reason: "must be within 1..100"}
+	}
+	if r.WindowCenter != nil && !isFinite(*r.WindowCenter) {
+		return &wado.RequestError{Field: fieldWindowCenter, Reason: "must be a finite number"}
+	}
+	if r.WindowWidth != nil && !isFinite(*r.WindowWidth) {
+		return &wado.RequestError{Field: "WindowWidth", Reason: "must be a finite number"}
 	}
 	for _, a := range r.Annotation {
 		if a != AnnotationPatient && a != AnnotationTechnique {
@@ -223,6 +285,9 @@ func (r Request) validateRenderedValues(isDICOM bool) error {
 	}
 	return nil
 }
+
+// isFinite reports whether f is neither NaN nor an infinity.
+func isFinite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
 
 // query encodes the query parameters; the current PS3.18 naming is the
 // default (anonymize, in force since 2019) and legacy switches the
@@ -282,7 +347,17 @@ func (r Request) query(legacy bool) url.Values {
 	if r.PresentationSeriesUID != "" {
 		q.Set("presentationSeriesUID", r.PresentationSeriesUID)
 	}
+	// Extra overrides same-name standard parameters instead of appending a
+	// duplicate that leaves the server to pick between two values. Matching is
+	// case-insensitive: query names are case-sensitive on the wire, but a
+	// caller writing "StudyUID" plainly means "studyUID". This matches the
+	// override semantics of wadors.WithRawQuery.
 	for k, vs := range r.Extra {
+		for existing := range q {
+			if strings.EqualFold(existing, k) {
+				q.Del(existing)
+			}
+		}
 		for _, v := range vs {
 			q.Add(k, v)
 		}

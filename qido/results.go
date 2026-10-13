@@ -48,6 +48,9 @@ type ResultsStream struct {
 	resp   *http.Response // the 204 form: kept open only to be closed
 	items  *dicomjson.Items
 	done   bool
+	// err is the sticky failure: once set, every Next returns it, so a
+	// malformed part cannot turn into an infinite retry loop.
+	err error
 }
 
 // Header returns the header of the underlying HTTP response.
@@ -62,15 +65,32 @@ func (s *ResultsStream) AdditionalResults() (int64, bool) {
 // Next returns the next matching dataset; it returns io.EOF when the reply
 // is exhausted. Relative BulkDataURIs are resolved against the search
 // request URL per PS3.18.
+//
+// A decode failure poisons the cursor: the error is returned once and every
+// later call returns the same error, so a caller cannot spin forever on a
+// malformed part and cannot be misled into treating the truncated remainder
+// of the reply as a complete result set.
 func (s *ResultsStream) Next() (*dataset.Dataset, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
 	for {
 		if s.items != nil {
 			raw, ok, err := s.items.Next()
 			if err != nil {
-				return nil, fmt.Errorf("qido: decode search response: %w", err)
+				// Drop the poisoned item cursor: without this the same error
+				// would be returned forever and later parts never reached.
+				s.items = nil
+				s.err = fmt.Errorf("qido: decode search response: %w", err)
+				return nil, s.err
 			}
 			if ok {
-				return parseDataset(raw, s.base)
+				ds, err := parseDataset(raw, s.base)
+				if err != nil {
+					s.err = err
+					return nil, s.err
+				}
+				return ds, nil
 			}
 			s.items = nil
 		}
@@ -83,13 +103,16 @@ func (s *ResultsStream) Next() (*dataset.Dataset, error) {
 			return nil, io.EOF
 		}
 		if err != nil {
-			return nil, err
+			s.err = err
+			return nil, s.err
 		}
 		if err := guardXML(ct); err != nil {
-			return nil, err
+			s.err = err
+			return nil, s.err
 		}
 		if s.items, err = dicomjson.NewItems(r); err != nil {
-			return nil, fmt.Errorf("qido: decode search response: %w", err)
+			s.err = fmt.Errorf("qido: decode search response: %w", err)
+			return nil, s.err
 		}
 	}
 }
@@ -151,22 +174,56 @@ func guardXML(ct string) error {
 
 // additionalResults parses the Warning header for the 299 code and its "N
 // additional results that can be requested" text; ok is false when no 299
-// warning is present. Values of a single comma-joined Warning header beyond
-// the first code are not inspected.
+// warning is present.
+//
+// RFC 9110 defines Warning as a comma-separated list (1#warning-value) and
+// intermediaries may coalesce repeated fields into one, so every
+// comma-separated element is inspected rather than only the first code of
+// each header value.
 func additionalResults(h http.Header) (int64, bool) {
 	for _, v := range h.Values("Warning") {
-		code, rest, found := strings.Cut(strings.TrimSpace(v), " ")
-		if !found || code != "299" {
-			continue
+		for _, elem := range splitWarningList(v) {
+			code, rest, found := strings.Cut(strings.TrimSpace(elem), " ")
+			if !found || code != "299" {
+				continue
+			}
+			rest = strings.Trim(strings.TrimSpace(rest), `"`)
+			if m := additionalRe.FindStringSubmatch(rest); m != nil {
+				n, _ := strconv.ParseInt(m[1], 10, 64)
+				return n, true
+			}
+			return 0, true
 		}
-		rest = strings.Trim(strings.TrimSpace(rest), `"`)
-		if m := additionalRe.FindStringSubmatch(rest); m != nil {
-			n, _ := strconv.ParseInt(m[1], 10, 64)
-			return n, true
-		}
-		return 0, true
 	}
 	return 0, false
+}
+
+// splitWarningList splits one Warning header value into its comma-separated
+// warning-values. Commas inside a quoted-string (the warn-text) are not
+// separators, so quoting is respected.
+func splitWarningList(v string) []string {
+	var (
+		out    []string
+		start  int
+		quoted bool
+		escape bool
+	)
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case escape:
+			escape = false
+		case c == '\\' && quoted:
+			escape = true
+		case c == '"':
+			quoted = !quoted
+		case c == ',' && !quoted:
+			out = append(out, v[start:i])
+			start = i + 1
+		}
+	}
+	out = append(out, v[start:])
+	return out
 }
 
 // additionalRe extracts the result count from the Warning 299 text ("There

@@ -1,6 +1,7 @@
 package wado
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -294,6 +295,35 @@ func xmlMethods(ms []wadlXMLMethod) []WADLMethod {
 // attributes carry a "@" prefix, repeated elements become arrays, unique
 // elements objects, text content a "value" field) ---
 
+// jsonList decodes an element that the BadgerFish convention renders as a
+// bare object when it occurs once and as an array when it repeats. Decoding
+// into a plain slice would fail on the single-occurrence form — which is the
+// common shape, since a Capabilities Description with one resource or one
+// method per resource is perfectly legal — so both are accepted.
+type jsonList[T any] []T
+
+func (l *jsonList[T]) UnmarshalJSON(b []byte) error {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*l = nil
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var items []T
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return err
+		}
+		*l = items
+		return nil
+	}
+	var one T
+	if err := json.Unmarshal(trimmed, &one); err != nil {
+		return err
+	}
+	*l = []T{one}
+	return nil
+}
+
 type wadlJSONApplication struct {
 	Application struct {
 		Resources *wadlJSONResources `json:"resources"`
@@ -301,22 +331,22 @@ type wadlJSONApplication struct {
 }
 
 type wadlJSONResources struct {
-	Base     string             `json:"@base"`
-	Resource []wadlJSONResource `json:"resource"`
+	Base     string                     `json:"@base"`
+	Resource jsonList[wadlJSONResource] `json:"resource"`
 }
 
 type wadlJSONResource struct {
-	Path     string             `json:"@path"`
-	Method   []wadlJSONMethod   `json:"method"`
-	Resource []wadlJSONResource `json:"resource"`
+	Path     string                     `json:"@path"`
+	Method   jsonList[wadlJSONMethod]   `json:"method"`
+	Resource jsonList[wadlJSONResource] `json:"resource"`
 }
 
 type wadlJSONMethod struct {
 	Name     string `json:"@name"`
 	Response struct {
-		Representation []struct {
+		Representation jsonList[struct {
 			MediaType string `json:"@mediaType"`
-		} `json:"representation"`
+		}] `json:"representation"`
 	} `json:"response"`
 }
 
@@ -340,7 +370,7 @@ func parseWADLJSON(body []byte) (*WADL, error) {
 	}, nil
 }
 
-func flattenJSONResources(parent string, rs []wadlJSONResource) []WADLResource {
+func flattenJSONResources(parent string, rs jsonList[wadlJSONResource]) []WADLResource {
 	var out []WADLResource
 	for _, r := range rs {
 		p := joinWADLPath(parent, r.Path)
