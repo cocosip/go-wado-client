@@ -145,7 +145,7 @@ func (s *Service) Capabilities(ctx context.Context, opts ...CapabilitiesOption) 
 		if accept == "" {
 			accept = MediaTypeWADLXML + ", " + MediaTypeWADLJSON
 		}
-		req.Header.Set("Accept", accept)
+		req.Header.Set(headerAccept, accept)
 	})
 	if err != nil {
 		return nil, err

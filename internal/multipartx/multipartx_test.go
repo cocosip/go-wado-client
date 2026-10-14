@@ -15,6 +15,9 @@ func mimeParse(ct string) (string, map[string]string, error) {
 	return mime.ParseMediaType(ct)
 }
 
+// testJSONMediaType is the part media type used across the fake payloads.
+const testJSONMediaType = "application/dicom+json"
+
 // resp builds a minimal response with the given Content-Type and body.
 func resp(contentType, body string) *http.Response {
 	return &http.Response{
@@ -32,6 +35,38 @@ func TestNewRejectsMultipartWithoutBoundary(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "boundary") {
 		t.Errorf("err = %v, want it to mention the boundary", err)
+	}
+}
+
+func TestClassify(t *testing.T) {
+	cases := []struct {
+		ct   string
+		want Classified
+	}{
+		{
+			`multipart/related; type="application/dicom"; boundary=B`,
+			Classified{Multipart: true, Boundary: "B", PartType: "application/dicom"},
+		},
+		{
+			testJSONMediaType,
+			Classified{SingleType: testJSONMediaType},
+		},
+		{
+			// unparsable header, boundary still recovered textually
+			`multipart/related; boundary=a=b`,
+			Classified{Multipart: true, Boundary: "a=b"},
+		},
+		{
+			// unparsable header (parameter without a value), no boundary to
+			// recover
+			`multipart/related; boundary`,
+			Classified{Multipart: true},
+		},
+	}
+	for _, c := range cases {
+		if got := Classify(c.ct); got != c.want {
+			t.Errorf("Classify(%q) = %+v, want %+v", c.ct, got, c.want)
+		}
 	}
 }
 
@@ -62,7 +97,7 @@ func TestNewRecoversBoundaryFromUnparsableContentType(t *testing.T) {
 }
 
 func TestNewSinglePartFallback(t *testing.T) {
-	p, err := New(resp("application/dicom+json", "[]"))
+	p, err := New(resp(testJSONMediaType, "[]"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +107,7 @@ func TestNewSinglePartFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ct != "application/dicom+json" {
+	if ct != testJSONMediaType {
 		t.Errorf("contentType = %q", ct)
 	}
 	if _, err := io.ReadAll(r); err != nil {

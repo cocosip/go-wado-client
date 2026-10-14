@@ -90,6 +90,80 @@ func TestCoreHeadersAndAuth(t *testing.T) {
 
 // TestCoreLoggerInjection verifies slog integration: the logger is injected
 // explicitly and slog.Default() is never used implicitly.
+// TestCoreRedirectStripsEditorHeadersCrossHost guards the redirect trust
+// boundary: a redirect to another host carries only the headers the library
+// sets itself, never the auth/request editors' headers (net/http alone keeps
+// Authorization on same-name-different-port hops, so the guard is what stops
+// them too).
+func TestCoreRedirectStripsEditorHeadersCrossHost(t *testing.T) {
+	var got http.Header
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/x", http.StatusFound)
+	}))
+	defer gw.Close()
+
+	core := mustCore(t,
+		WithBasicAuth("u", "p"),
+		WithRequestEditor(func(r *http.Request) error {
+			r.Header.Set("X-Private-Signature", "secret")
+			return nil
+		}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, gw.URL, nil)
+	resp, err := core.Do(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	// httptest servers listen on 127.0.0.1 with distinct ports: different Host.
+	if h := got.Get("X-Private-Signature"); h != "" {
+		t.Errorf("cross-host redirect received X-Private-Signature = %q", h)
+	}
+	if h := got.Get("Authorization"); h != "" {
+		t.Errorf("cross-host redirect received Authorization = %q", h)
+	}
+	if got.Get("User-Agent") != DefaultUserAgent {
+		t.Errorf("User-Agent = %q, want %q", got.Get("User-Agent"), DefaultUserAgent)
+	}
+}
+
+// TestCoreRedirectKeepsEditorHeadersSameHost: a redirect staying on the same
+// host keeps every header (http→https upgrades and path fixes must not lose
+// the editors' authentication).
+func TestCoreRedirectKeepsEditorHeadersSameHost(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hop" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	core := mustCore(t, WithRequestEditor(func(r *http.Request) error {
+		r.Header.Set("X-Private-Signature", "secret")
+		return nil
+	}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/hop", nil)
+	resp, err := core.Do(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	if got.Get("X-Private-Signature") != "secret" {
+		t.Errorf("same-host redirect lost X-Private-Signature (headers = %v)", got)
+	}
+}
+
 func TestCoreLoggerInjection(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))

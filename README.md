@@ -45,6 +45,11 @@ https://gw.example.com/api/wado/H1/RS /studies/1.2.840.../series/1.2.../instance
 https://gw.example.com/api/wado/H1/RIS/wado-uri ?requestType=WADO&studyUID=...
 ```
 
+The prefix is normalized (cleaned, trailing slash removed) and must be passed
+unescaped: a percent-encoded slash (`%2F`) in it is rejected up front, because
+the path is cleaned decoded and such a segment would silently address a
+different prefix than the configured one.
+
 ## Install
 
 ```sh
@@ -241,6 +246,13 @@ Shared options (`wado.Option`, apply to every client and the registry):
 
 Notes:
 
+- **Redirects and credentials:** clients the library builds follow redirects,
+  but a hop to another host carries only the headers the library sets itself
+  (User-Agent, Accept) — never the auth/request editors' headers (a private
+  signature header, say), which a compromised or buggy gateway must not be
+  able to forward anywhere with a single 302. This is the same trust boundary
+  `WithBulkDataHostPolicy` draws for Bulk Data URIs. Clients supplied via
+  `WithHTTPClient` keep their own redirect policy.
 - **Logging** uses `log/slog` and is strictly opt-in: nothing is logged
   unless you inject a logger; the library never falls back to
   `slog.Default()`.

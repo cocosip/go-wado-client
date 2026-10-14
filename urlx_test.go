@@ -14,6 +14,8 @@ func TestParseBaseURL(t *testing.T) {
 		{"https://h.cn/api//wado/../wado", "https://h.cn/api/wado"},
 		{"http://10.0.0.1:8443/dicomweb/", "http://10.0.0.1:8443/dicomweb"},
 		{host + "/p?x=1#frag", host + "/p"},
+		// Escapes that survive the decoded clean untouched stay valid.
+		{host + "/wado%20x", host + "/wado%20x"},
 	}
 	for _, c := range cases {
 		u, err := ParseBaseURL(c.in)
@@ -25,7 +27,12 @@ func TestParseBaseURL(t *testing.T) {
 		}
 	}
 
-	bad := []string{"", "   ", "localhost/x", "ftp://h/x", "://x", "/api/wado"}
+	bad := []string{
+		"", "   ", "localhost/x", "ftp://h/x", "://x", "/api/wado",
+		// An encoded slash would decode into a path separator below the clean
+		// and silently address a different prefix.
+		"https://h.cn/a%2Fb", "https://h.cn/a%2fb",
+	}
 	for _, in := range bad {
 		if _, err := ParseBaseURL(in); err == nil {
 			t.Errorf("ParseBaseURL(%q) expected error", in)

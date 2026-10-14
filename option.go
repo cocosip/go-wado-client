@@ -66,7 +66,10 @@ func (p BulkDataHostPolicy) String() string {
 	}
 }
 
-// WithHTTPClient takes over the HTTP client entirely (proxying etc.).
+// WithHTTPClient takes over the HTTP client entirely (proxying etc.). The
+// takeover includes the redirect policy: the cross-host header stripping the
+// library's own clients apply (see WithRequestEditor) is not layered onto a
+// caller-supplied client.
 func WithHTTPClient(c *http.Client) Option {
 	return func(s *settings) { s.httpClient = c }
 }
@@ -121,6 +124,12 @@ func WithBearerTokenSource(ts TokenSource) Option {
 
 // WithRequestEditor mutates the request right before it is sent (private
 // signature headers etc.); editors are chainable.
+//
+// On library-built clients an editor's headers never travel to a host a
+// redirect names: a hop to another host keeps only the headers the library
+// itself sets (User-Agent, Accept). This is the same trust boundary
+// WithBulkDataHostPolicy draws for Bulk Data URIs; see WithHTTPClient for the
+// takeover that keeps a caller's own redirect policy.
 func WithRequestEditor(fn func(*http.Request) error) Option {
 	return func(s *settings) { s.editors = append(s.editors, fn) }
 }

@@ -1,7 +1,6 @@
 package qido
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/cocosip/go-dicom/pkg/dicom/dataset"
-	"github.com/cocosip/go-dicom/pkg/dicom/serialization"
 
 	"github.com/cocosip/go-wado-client/internal/dicomjson"
 	"github.com/cocosip/go-wado-client/internal/multipartx"
@@ -85,7 +83,7 @@ func (s *ResultsStream) Next() (*dataset.Dataset, error) {
 				return nil, s.err
 			}
 			if ok {
-				ds, err := parseDataset(raw, s.base)
+				ds, err := dicomjson.ParseDataset("qido", raw, s.base)
 				if err != nil {
 					s.err = err
 					return nil, s.err
@@ -141,20 +139,6 @@ func (s *ResultsStream) collect() ([]*dataset.Dataset, error) {
 		}
 		out = append(out, ds)
 	}
-}
-
-// parseDataset parses one dicom+json item into a go-dicom dataset, resolving
-// relative BulkDataURIs against the search request URL first.
-func parseDataset(raw json.RawMessage, base *url.URL) (*dataset.Dataset, error) {
-	fixed, err := dicomjson.ResolveBulkDataURIs(raw, base)
-	if err != nil {
-		return nil, fmt.Errorf("qido: rewrite BulkDataURI: %w", err)
-	}
-	ds, err := serialization.FromJSON(fixed)
-	if err != nil {
-		return nil, fmt.Errorf("qido: parse dicom+json: %w", err)
-	}
-	return ds, nil
 }
 
 // guardXML rejects an explicitly negotiated dicom+xml reply: this client

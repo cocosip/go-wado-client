@@ -120,7 +120,10 @@ wadouri.New("https://gw.hosp-b.cn/wado-uri")
 
 ### D3. multipart/related 流式解析
 
-- 从响应 `Content-Type` 用 `mime.ParseMediaType` 提取 `boundary` 与 `type`（各 part 的媒体类型）。
+- 响应分类统一走 `internal/multipartx.Classify`（wadors 与 qido 共用）：`mime.ParseMediaType`
+  提取 `boundary` 与 `type`（各 part 的媒体类型）；解析失败的头仍按 multipart 前缀嗅探并文本恢复
+  `boundary`（真实网关会发不带引号等非规范参数——此前仅 qido 游标有该容错，同一网关怪癖会出现
+  "搜索可用、取回全挂"的分裂）。
 - `multipart.NewReader(resp.Body, boundary)` 直接绑定 HTTP 响应体 → **边下载边消费，内存占用与 Study 大小无关**。
 - 容错：`type` 参数缺失时降级用首个 part 的 `Content-Type`；容忍大小写/空格差异（`mime` 包天然容忍）。
 - 大 part 不经缓冲直读（`*Part` 本身是 `io.Reader`，可直接 `io.Copy` 落盘）。
@@ -137,6 +140,12 @@ IdleConnTimeout:       90s
 ```
 
 gzip 不手动设置 `Accept-Encoding`，交给 Transport 自动协商与透明解压（multipart 场景关键：手工设头会拿到未解压流）。
+
+重定向策略（库自建的 client）：跟随重定向，但**跨主机跳转只保留库自身设置的头**
+（User-Agent/Accept）。net/http 仅自动剥离 Authorization/WWW-Authenticate/Cookie，且同主机名
+不同端口不剥离；编辑器设置的私有签名头若不拦，网关一个 302 就能把它们送往任意主机——与
+`WithBulkDataHostPolicy` 的信任边界（D10）矛盾。每跳的头都从原始请求拷贝，故逐跳独立判定；
+`WithHTTPClient` 接管的 client 保持调用方自己的策略。
 
 ### D5. 鉴权与可观测性全部做成插拔点，不绑定任何一家
 
@@ -471,7 +480,8 @@ res, _ := g.URI.Retrieve(ctx, wadouri.Request{
   URL 策略 + method 化的 Do + 非 2xx→StatusError + UID 白名单），wadors/wadouri/qido
   统一持有一个 Service，**公开 API 零变化**；`internal/queryx`（FormatFloat）、
   `internal/dicomjson`（dicom+json 流式 item 解码 + BulkDataURI 绝对化，wadors 元数据
-  与 qido 共用）、`internal/multipartx`（multipart/related 最小游标 + 单段容错）。
+  与 qido 共用）、`internal/multipartx`（multipart/related 最小游标 + 单段容错 + `Classify`
+  响应分类/boundary 文本恢复，wadors 游标复用同一份）。
 - **D12. QIDO 查询编码**：`Query` 结构按 §8.3.4 建模（匹配键保序可重复、tri-state 布尔
   `nil`=省略、limit/offset 指针/零值语义）；键位字符串走白名单（`[A-Za-z0-9_.]`+点分），
   值按 `url.QueryEscape` 后恢复裸逗号（与标准示例逐字节一致）；`Extra` 透传兜底
@@ -562,3 +572,25 @@ M1–M5 核心已全部实现，单元/httptest 测试全绿（`go vet` / `gofmt
      - 新增 `WithMaxIdleConnsPerHost`：高并发 HTTP/1.1 取图时可调大空闲连接池，避免超出池的连接用后即弃反复 TLS 握手（默认仍 8；调用方自带 Transport 不受影响）；
      - `NewStatusError` 报文截断统一为 4KB（原读取 8KB 只保留 4KB）；
      - 帧列表渲染长度超过 2048 字符时告警日志（网关可能回 414 URL Too Long），新增 `Core.Logger()` 访问器。
+
+9. **全库走查修复（2026-10 审计轮，含逐项实证复现）**：
+   - **网关兼容性（必修）**：multipart 响应分类收敛到 `multipartx.Classify`，`wadors.Multipart`
+     与 qido 游标共用同一份 boundary 文本恢复——此前仅 qido 有该容错，实测同一非规范
+     Content-Type（如 `boundary=a=b`）下"搜索可用、影像取回全挂"；顺带消除两份必须同步演进的
+     近重复分类逻辑。
+   - **安全（应修）**：库自建 client 的 `CheckRedirect` 跨主机剥离全部非库设头（仅留
+     User-Agent/Accept）。实测 net/http 只自动剥离 Authorization/WWW-Authenticate/Cookie 且
+     同主机名不同端口不剥离，编辑器私有签名头原会跟随 302 到任意主机——与 `WithBulkDataHostPolicy`
+     的信任边界矛盾（被入侵网关一个 302 即可收割签名）。同主机跳转（http→https 升级、路径
+     修正）不受影响；`WithHTTPClient` 接管的 client 保持调用方自己的策略（`WithRequestEditor`/
+     `WithHTTPClient` 文档均已注明）。
+   - **健壮性（应修）**：`wadors.MetadataStream` 解码错误改为粘性（对齐 `qido.ResultsStream`
+     的既有契约）：坏条目后再次 `Next` 返回同一错误，不再从已失败的 JSON 解码器续读（续读的
+     条目位置未定义，可能静默跳过/错读坏条目）。
+   - **正确性（应修）**：`ParseBaseURL` 拒绝前缀中的编码斜杠 `%2F`（任意大小写）——路径按解码
+     形式清理且丢弃 RawPath，编码斜杠会被静默拆成两段、寻址到别的前缀（实测
+     `https://gw/api/a%2Fb` 归一为 `.../api/a/b`）；与 `multi.joinRoute` 拒绝路由中 `%` 的
+     理由一致。其余合法转义（如 `%20`）往返保持。
+   - **精简**：`dicomjson.ParseDataset` 合并 wadors/qido 两处"改写 BulkDataURI + FromJSON"
+     重复助手（包注释同步更新）；示例 `examples/wadors` 的 `parts[0]` 补零 part 保护；
+     `User-Agent`/`Accept` 头名收敛为常量。

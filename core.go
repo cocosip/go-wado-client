@@ -15,11 +15,20 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // DefaultUserAgent is the default User-Agent.
 const DefaultUserAgent = "go-wado-client/0.1"
+
+// Header names this library sets itself on every request (everything else on
+// the wire comes from the caller's auth/request editors) — the allowlist the
+// redirect guard keeps when a redirect crosses to another host.
+const (
+	headerUserAgent = "User-Agent"
+	headerAccept    = "Accept"
+)
 
 // Core carries the transport assembly shared by the wadors / wadouri
 // clients: HTTP client (connection pool), auth/request editors, retry and
@@ -136,7 +145,7 @@ func (s *settings) httpClientOrDefault() (*http.Client, error) {
 		if s.tlsCfg != nil {
 			t.TLSClientConfig = s.tlsCfg
 		}
-		return &http.Client{Transport: t}, nil
+		return &http.Client{Transport: t, CheckRedirect: redirectGuard}, nil
 	}
 
 	base, isTransport := s.httpClient.Transport.(*http.Transport)
@@ -201,6 +210,36 @@ func defaultTransport() *http.Transport {
 	return t
 }
 
+// redirectGuard is the CheckRedirect of library-built HTTP clients: redirects
+// are followed, but a hop to another host carries none of the caller's
+// headers.
+//
+// net/http already drops Authorization, WWW-Authenticate and Cookie when a
+// redirect changes host; this extends the same guarantee to the auth/request
+// editors, whose headers (private signature headers etc.) would otherwise
+// follow a server-chosen redirect anywhere — the same trust boundary
+// WithBulkDataHostPolicy draws for Bulk Data URIs. A compromised or buggy
+// gateway must not be able to harvest them with a single 302.
+//
+// Every redirect hop copies its headers from the original request, so each
+// hop is checked (and stripped) independently; a hop back to the original
+// host receives them again, which is safe — that host got them on the first
+// request already. Clients supplied via WithHTTPClient keep their own policy.
+func redirectGuard(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("wado: stopped after 10 redirects")
+	}
+	if len(via) == 0 || strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return nil
+	}
+	for k := range req.Header {
+		if k != headerUserAgent && k != headerAccept {
+			req.Header.Del(k)
+		}
+	}
+	return nil
+}
+
 // Do sends the request: editors (so tokens refresh) and the User-Agent are
 // applied before every attempt, and network errors plus 429/502/503/504 are
 // retried with backoff according to the configured policy.
@@ -247,8 +286,8 @@ func (c *Core) do(ctx context.Context, req *http.Request, withEditors bool) (*ht
 				}
 			}
 		}
-		if r.Header.Get("User-Agent") == "" {
-			r.Header.Set("User-Agent", c.ua)
+		if r.Header.Get(headerUserAgent) == "" {
+			r.Header.Set(headerUserAgent, c.ua)
 		}
 		start := time.Now()
 		resp, err := c.hc.Do(r)

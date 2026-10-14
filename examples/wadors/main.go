@@ -191,6 +191,9 @@ func runInstance(ctx context.Context, ic *wadors.Client, studyUID, seriesUID, so
 	if err != nil {
 		return fmt.Errorf("read instance: %w", err)
 	}
+	if len(parts) == 0 {
+		return errors.New("instance response had no parts")
+	}
 	fmt.Printf("instance: %d part(s), first is %d bytes\n", len(parts), len(parts[0]))
 
 	// Parse the same instance with go-dicom via the optional dicomx bridge.

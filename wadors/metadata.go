@@ -2,7 +2,6 @@ package wadors
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +9,6 @@ import (
 	"net/url"
 
 	"github.com/cocosip/go-dicom/pkg/dicom/dataset"
-	"github.com/cocosip/go-dicom/pkg/dicom/serialization"
 
 	"github.com/cocosip/go-wado-client/internal/dicomjson"
 )
@@ -109,52 +107,62 @@ type MetadataStream struct {
 	mp    *Multipart
 	base  *url.URL
 	items *dicomjson.Items // streaming item cursor of the current part
+	// err is the sticky failure: once set, every Next returns it, so a
+	// malformed part cannot be resumed mid-decoder (matching
+	// qido.ResultsStream, whose callers rely on the error repeating rather
+	// than the cursor silently skipping past the broken item).
+	err error
 }
 
 // Next returns the next dataset; it returns io.EOF when the response is
 // exhausted. Relative BulkDataURIs are resolved against the metadata request
 // URL per PS3.18.
+//
+// A decode failure poisons the cursor: the error is returned once and every
+// later call returns the same error — continuing to iterate a failed JSON
+// decoder yields items from an undefined position, which would silently skip
+// or misread the broken item instead of failing.
 func (s *MetadataStream) Next() (*dataset.Dataset, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
 	for {
 		if s.items != nil {
 			raw, ok, err := s.items.Next()
 			if err != nil {
-				return nil, fmt.Errorf("wadors: decode metadata: %w", err)
+				// Drop the poisoned item cursor; the sticky error below keeps
+				// it from being resumed.
+				s.items = nil
+				s.err = fmt.Errorf("wadors: decode metadata: %w", err)
+				return nil, s.err
 			}
 			if ok {
-				return metadataDataset(raw, s.base)
+				ds, err := dicomjson.ParseDataset("wadors", raw, s.base)
+				if err != nil {
+					s.err = err
+					return nil, s.err
+				}
+				return ds, nil
 			}
 			s.items = nil
 		}
 		p, err := s.mp.Next()
+		if errors.Is(err, io.EOF) {
+			return nil, io.EOF
+		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil, io.EOF
-			}
-			return nil, err
+			s.err = err
+			return nil, s.err
 		}
 		if s.items, err = dicomjson.NewItems(p); err != nil {
-			return nil, fmt.Errorf("wadors: decode metadata: %w", err)
+			s.err = fmt.Errorf("wadors: decode metadata: %w", err)
+			return nil, s.err
 		}
 	}
 }
 
 // Close closes the underlying response.
 func (s *MetadataStream) Close() error { return s.mp.Close() }
-
-// metadataDataset parses one metadata item (a bare dataset object; array
-// unwrapping happens in the dicomjson item cursor).
-func metadataDataset(raw json.RawMessage, reqURL *url.URL) (*dataset.Dataset, error) {
-	fixed, err := dicomjson.ResolveBulkDataURIs(raw, reqURL)
-	if err != nil {
-		return nil, fmt.Errorf("wadors: decode metadata json: %w", err)
-	}
-	ds, err := serialization.FromJSON(fixed)
-	if err != nil {
-		return nil, fmt.Errorf("wadors: parse dicom+json: %w", err)
-	}
-	return ds, nil
-}
 
 // metadataStream fetches a metadata resource and returns a streaming cursor
 // over its dataset items.

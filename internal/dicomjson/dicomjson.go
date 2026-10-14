@@ -1,8 +1,9 @@
 // Package dicomjson provides the dicom+json (PS3.18 Annex F) decoding
 // pieces shared by the metadata (WADO-RS) and search (QIDO-RS) clients:
-// streaming item decoding of a response body and the PS3.18-relative
-// BulkDataURI rewriting. Interpreting the datasets themselves stays with
-// go-dicom in the callers.
+// streaming item decoding of a response body, the PS3.18-relative
+// BulkDataURI rewriting, and the combined resolve-and-parse step of one item
+// (ParseDataset). The owning service package stays in charge of the error
+// prefix and the request URL the relative form resolves against.
 //
 // Errors carry no prefix: the owning service package wraps them with its
 // own context.
@@ -16,6 +17,9 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+
+	"github.com/cocosip/go-dicom/pkg/dicom/dataset"
+	"github.com/cocosip/go-dicom/pkg/dicom/serialization"
 )
 
 // Items streams the dataset items of one dicom+json response body: the
@@ -270,4 +274,20 @@ func resolveBulkDataValue(v any, base *url.URL) bool {
 		}
 	}
 	return changed
+}
+
+// ParseDataset is the shared resolve-and-parse step of one dicom+json item:
+// relative BulkDataURIs are rewritten against base first (see
+// ResolveBulkDataURIs), then the item is handed to go-dicom's serialization.
+// caller names the owning service package and prefixes the error values.
+func ParseDataset(caller string, raw json.RawMessage, base *url.URL) (*dataset.Dataset, error) {
+	fixed, err := ResolveBulkDataURIs(raw, base)
+	if err != nil {
+		return nil, fmt.Errorf("%s: rewrite BulkDataURI: %w", caller, err)
+	}
+	ds, err := serialization.FromJSON(fixed)
+	if err != nil {
+		return nil, fmt.Errorf("%s: parse dicom+json: %w", caller, err)
+	}
+	return ds, nil
 }

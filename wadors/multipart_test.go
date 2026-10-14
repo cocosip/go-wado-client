@@ -3,6 +3,7 @@ package wadors
 import (
 	"context"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -210,5 +211,37 @@ func TestMultipartMissingBoundary(t *testing.T) {
 	_, err := c.RetrieveStudy(context.Background(), "1.2.3")
 	if err == nil {
 		t.Fatal("expected error for multipart without boundary")
+	}
+}
+
+// TestMultipartRecoversBoundaryFromUnparsableContentType guards the shared
+// classification: a Content-Type mime.ParseMediaType rejects must not fail the
+// retrieval when the boundary is recoverable textually — the tolerance the
+// qido cursor has always had, so one gateway quirk cannot pass search yet
+// fail retrieval.
+func TestMultipartRecoversBoundaryFromUnparsableContentType(t *testing.T) {
+	// An unquoted boundary containing '=' makes mime.ParseMediaType fail.
+	const ct = `multipart/related; boundary=a=b`
+	if _, _, err := mime.ParseMediaType(ct); err == nil {
+		t.Skip("the stdlib now parses this Content-Type; the fallback is no longer exercised")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", ct)
+		_, _ = w.Write([]byte("--a=b\r\nContent-Type: application/dicom\r\n\r\nDICOMBYTES\r\n--a=b--\r\n"))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/dicomweb")
+	mp, err := c.RetrieveStudy(context.Background(), "1.2.3")
+	if err != nil {
+		t.Fatalf("RetrieveStudy: %v", err)
+	}
+	defer func() { _ = mp.Close() }()
+	parts, err := mp.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(parts) != 1 || string(parts[0]) != "DICOMBYTES" {
+		t.Errorf("parts = %q, want one DICOMBYTES part", parts)
 	}
 }

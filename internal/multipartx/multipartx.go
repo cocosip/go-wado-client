@@ -71,30 +71,57 @@ type Parts struct {
 
 // New classifies the response by its Content-Type and binds the cursor to
 // its body.
+func New(resp *http.Response) (*Parts, error) {
+	ct := resp.Header.Get("Content-Type")
+	c := Classify(ct)
+	if !c.Multipart {
+		return &Parts{resp: resp, single: true, singleCT: c.SingleType}, nil
+	}
+	if c.Boundary == "" {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("multipart response without boundary: %q", ct)
+	}
+	tracker := NewTracker(resp.Body, c.Boundary)
+	return &Parts{resp: resp, mr: multipart.NewReader(tracker, c.Boundary), tracker: tracker}, nil
+}
+
+// Classified is the multipart classification of a response Content-Type: the
+// shared input of every cursor over a multipart/related reply (wadors.Multipart
+// and Parts alike).
+type Classified struct {
+	// Multipart reports a multipart/* media type.
+	Multipart bool
+	// Boundary is the multipart boundary; empty when none was found.
+	Boundary string
+	// PartType is the type parameter of a multipart Content-Type (the
+	// per-part media type).
+	PartType string
+	// SingleType is the media type of the single-part form (the response media
+	// type); meaningful only when Multipart is false.
+	SingleType string
+}
+
+// Classify splits a response Content-Type into the inputs of a multipart
+// cursor: whether the reply is multipart, its boundary, and the per-part media
+// type.
 //
 // A Content-Type that mime.ParseMediaType rejects is still sniffed for the
 // multipart prefix and the boundary is recovered textually: real gateways
 // emit unquoted or otherwise non-conformant type parameters, and giving up on
 // them would fail the whole request rather than just the media-type detail.
-func New(resp *http.Response) (*Parts, error) {
-	ct := resp.Header.Get("Content-Type")
+func Classify(ct string) Classified {
 	mt, params, err := mime.ParseMediaType(ct)
 	if err != nil {
 		mt, params = ct, map[string]string{}
 	}
-	if strings.HasPrefix(strings.ToLower(mt), "multipart/") {
-		boundary := params["boundary"]
-		if boundary == "" {
-			boundary = sniffBoundary(ct)
-		}
-		if boundary == "" {
-			_ = resp.Body.Close()
-			return nil, fmt.Errorf("multipart response without boundary: %q", ct)
-		}
-		tracker := NewTracker(resp.Body, boundary)
-		return &Parts{resp: resp, mr: multipart.NewReader(tracker, boundary), tracker: tracker}, nil
+	if !strings.HasPrefix(strings.ToLower(mt), "multipart/") {
+		return Classified{SingleType: mt}
 	}
-	return &Parts{resp: resp, single: true, singleCT: mt}, nil
+	boundary := params["boundary"]
+	if boundary == "" {
+		boundary = sniffBoundary(ct)
+	}
+	return Classified{Multipart: true, Boundary: boundary, PartType: params["type"]}
 }
 
 // sniffBoundary recovers a boundary parameter from a Content-Type that

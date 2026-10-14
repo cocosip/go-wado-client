@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -20,8 +19,9 @@ import (
 // Multipart is a streaming cursor over a WADO-RS multipart/related response:
 // parts are consumed while downloading, so memory usage is independent of
 // the total response size. Close must be called when done.
-// Non-multipart responses are tolerated as a single part (some servers are
-// not strictly conformant).
+// Non-multipart responses are tolerated as a single part, and a boundary the
+// Content-Type's parameters cannot supply is recovered textually (some
+// servers are not strictly conformant).
 type Multipart struct {
 	resp          *http.Response
 	mr            *multipart.Reader
@@ -34,27 +34,27 @@ type Multipart struct {
 	doneErr       error
 }
 
+// newMultipart binds the cursor to the response, classifying the reply through
+// the shared multipartx.Classify: a boundary the Content-Type's parameters
+// cannot supply (an unparsable header) is recovered textually, exactly like
+// the qido cursor, so one gateway quirk cannot pass search yet fail retrieval.
 func newMultipart(resp *http.Response) (*Multipart, error) {
 	ct := resp.Header.Get("Content-Type")
-	mt, params, err := mime.ParseMediaType(ct)
-	if err != nil {
-		mt, params = ct, map[string]string{}
+	c := multipartx.Classify(ct)
+	if !c.Multipart {
+		return &Multipart{resp: resp, single: true, singleCT: c.SingleType, PartMediaType: c.SingleType}, nil
 	}
-	if strings.HasPrefix(strings.ToLower(mt), "multipart/") {
-		boundary := params["boundary"]
-		if boundary == "" {
-			_ = resp.Body.Close()
-			return nil, fmt.Errorf("wadors: multipart response without boundary: %q", ct)
-		}
-		tracker := multipartx.NewTracker(resp.Body, boundary)
-		return &Multipart{
-			resp:          resp,
-			mr:            multipart.NewReader(tracker, boundary),
-			tracker:       tracker,
-			PartMediaType: params["type"],
-		}, nil
+	if c.Boundary == "" {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("wadors: multipart response without boundary: %q", ct)
 	}
-	return &Multipart{resp: resp, single: true, singleCT: mt, PartMediaType: mt}, nil
+	tracker := multipartx.NewTracker(resp.Body, c.Boundary)
+	return &Multipart{
+		resp:          resp,
+		mr:            multipart.NewReader(tracker, c.Boundary),
+		tracker:       tracker,
+		PartMediaType: c.PartType,
+	}, nil
 }
 
 // Next returns the next part; it returns io.EOF when the response is

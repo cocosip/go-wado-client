@@ -180,6 +180,35 @@ func TestMetadataInvalidJSON(t *testing.T) {
 	}
 }
 
+// TestMetadataStreamErrorIsSticky pins the cursor contract shared with
+// qido.ResultsStream: after a decode failure every later Next returns the
+// same error, never items read past the broken one on a failed decoder.
+func TestMetadataStreamErrorIsSticky(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", mediaTypeDICOMJSON)
+		_, _ = w.Write([]byte(`[{"00080018":{"vr":"UI","Value":["1.2.3"]}},oops]`))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL + "/dicomweb")
+	ms, err := c.StudyMetadataStream(context.Background(), "1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ms.Close() }()
+
+	if _, err := ms.Next(); err != nil {
+		t.Fatalf("first item: unexpected error: %v", err)
+	}
+	_, err1 := ms.Next()
+	if err1 == nil {
+		t.Fatal("second item: expected the decode error of the malformed element")
+	}
+	if _, err2 := ms.Next(); err2 != err1 {
+		t.Fatalf("third Next err = %v, want the same sticky error %v", err2, err1)
+	}
+}
+
 // TestMetadataNoTransferSyntaxOnAccept pins the scoping of
 // WithTransferSyntax: dicom+json has no transfer syntax, so the parameter
 // must not reach the metadata Accept header.
